@@ -1,7 +1,6 @@
 package com.makarena.browser
 
 import android.content.Context
-import kotlinx.coroutines.DispatchQueue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
