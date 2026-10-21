@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="oled_black">#04060B</color>
+    <color name="glass_surface">#0D111C</color>
+    <color name="neon_cyan">#26C6FF</color>
+    <color name="neon_purple">#A659FF</color>
+    <color name="neon_green">#2EF299</color>
+    <color name="neon_red">#FF3860</color>
+    <color name="text_white">#FFFFFF</color>
+    <color name="text_muted">#8E9BAE</color>
+    <color name="border_glass">#1FFFFFFF</color>
+</resources>

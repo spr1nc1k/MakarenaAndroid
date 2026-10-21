@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Makarena</string>
+    <string name="ai_active">AI ACTIVE</string>
+    <string name="panic_mode">PANIC MODE</string>
+    <string name="url_hint">Wpisz adres...</string>
+    <string name="settings_title">Ustawienia Systemu</string>
+    <string name="gemini_key_hint">Wklej darmowy klucz Gemini API (AIzaSy...)</string>
+</resources>

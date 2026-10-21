@@ -1,0 +1,16 @@
+<resources>
+    <style name="Theme.Makarena" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/neon_cyan</item>
+        <item name="colorSecondary">@color/neon_purple</item>
+        <item name="android:statusBarColor">@color/oled_black</item>
+        <item name="android:navigationBarColor">@color/oled_black</item>
+        <item name="android:windowBackground">@color/oled_black</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+
+    <style name="Theme.Makarena.Splash" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="android:statusBarColor">@color/oled_black</item>
+        <item name="android:navigationBarColor">@color/oled_black</item>
+        <item name="android:windowBackground">@color/oled_black</item>
+    </style>
+</resources>

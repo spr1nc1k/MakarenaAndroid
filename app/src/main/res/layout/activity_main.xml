@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/oled_black">
+
+    <!-- Top Loading Progress Bar -->
+    <ProgressBar
+        android:id="@+id/loading_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="2dp"
+        android:indeterminate="true"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Full-bleed Stealth WebView -->
+    <WebView
+        android:id="@+id/web_view"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toTopOf="@+id/gesture_strip"
+        app:layout_constraintTop_toBottomOf="@+id/loading_progress" />
+
+    <!-- Top Floating Status Pill -->
+    <LinearLayout
+        android:id="@+id/status_pill"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/bg_capsule"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="14dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="6dp"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <View
+            android:id="@+id/status_dot"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:layout_marginEnd="8dp"
+            android:background="@color/neon_green" />
+
+        <TextView
+            android:id="@+id/status_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:letterSpacing="0.1"
+            android:text="AI ACTIVE"
+            android:textColor="@color/text_white"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- Invisible Double-Tap Safety Gesture Strip -->
+    <View
+        android:id="@+id/gesture_strip"
+        android:layout_width="match_parent"
+        android:layout_height="16dp"
+        android:background="@android:color/transparent"
+        app:layout_constraintBottom_toTopOf="@+id/floating_dock" />
+
+    <!-- Floating 2026 Cyber Dock -->
+    <LinearLayout
+        android:id="@+id/floating_dock"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:layout_marginStart="14dp"
+        android:layout_marginEnd="14dp"
+        android:layout_marginBottom="12dp"
+        android:background="@drawable/bg_floating_dock"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <ImageButton
+            android:id="@+id/btn_back"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="@drawable/bg_circle_btn"
+            android:contentDescription="Wstecz"
+            android:src="@android:drawable/ic_media_previous"
+            app:tint="@color/text_white" />
+
+        <ImageButton
+            android:id="@+id/btn_forward"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_circle_btn"
+            android:contentDescription="Dalej"
+            android:src="@android:drawable/ic_media_next"
+            app:tint="@color/text_white" />
+
+        <!-- URL Capsule -->
+        <FrameLayout
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="8dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_capsule">
+
+            <EditText
+                android:id="@+id/edit_url"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@null"
+                android:fontFamily="monospace"
+                android:hint="@string/url_hint"
+                android:imeOptions="actionGo"
+                android:inputType="textUri"
+                android:maxLines="1"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:textColor="@color/text_white"
+                android:textColorHint="@color/text_muted"
+                android:textSize="12sp" />
+        </FrameLayout>
+
+        <ImageButton
+            android:id="@+id/btn_settings"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="@drawable/bg_circle_btn"
+            android:contentDescription="Ustawienia"
+            android:src="@android:drawable/ic_menu_preferences"
+            app:tint="@color/neon_cyan" />
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
