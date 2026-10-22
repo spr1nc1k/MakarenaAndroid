@@ -33,11 +33,11 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
+            android:layout_marginTop="6dp"
             android:fontFamily="monospace"
             android:letterSpacing="0.15"
-            android:text="ANDROID STEALTH RUNTIME 2026"
-            android:textColor="@color/neon_cyan"
+            android:text="STEALTH RUNTIME 2026"
+            android:textColor="#A0A0A0"
             android:textSize="10sp"
             android:textStyle="bold" />
 
@@ -47,7 +47,8 @@
             android:layout_width="120dp"
             android:layout_height="3dp"
             android:layout_marginTop="24dp"
-            android:indeterminate="true" />
+            android:indeterminate="true"
+            android:indeterminateTint="@color/text_white" />
     </LinearLayout>
 
 </RelativeLayout>

@@ -25,7 +25,7 @@ class SplashActivity : AppCompatActivity() {
             .alpha(1f)
             .scaleX(1f)
             .scaleY(1f)
-            .setDuration(900)
+            .setDuration(1000)
             .setInterpolator(AccelerateDecelerateInterpolator())
             .start()
 
@@ -33,6 +33,6 @@ class SplashActivity : AppCompatActivity() {
             startActivity(Intent(this, MainActivity::class.java))
             overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
             finish()
-        }, 1800)
+        }, 3000)
     }
 }
