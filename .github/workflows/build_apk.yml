@@ -42,3 +42,15 @@ jobs:
         with:
           name: Makarena-Android-APK
           path: dist/*.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: v1.1.5
+          name: "WhiteWeb Android v1.1.5"
+          files: |
+            dist/WhiteWeb.apk
+            dist/Makarena.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
