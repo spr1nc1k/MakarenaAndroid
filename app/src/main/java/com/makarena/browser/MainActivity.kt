@@ -286,6 +286,7 @@ class MainActivity : AppCompatActivity() {
                 // Iniekcja silnika analizy pytań i nakładek
                 val injectorScript = loadAssetScript("ai_injector.js")
                 if (injectorScript.isNotEmpty()) {
+                    view?.evaluateJavascript("window.__makarena_ai_active = $isAIActive;", null)
                     view?.evaluateJavascript(injectorScript, null)
                 }
 
@@ -438,20 +439,23 @@ class MainActivity : AppCompatActivity() {
 
         updateStatusPill(true)
 
-        if (isAIActive) {
-            triggerAIAnalysis()
-        } else {
-            triggerPanicMode()
-        }
+        val action = if (isAIActive) "enable" else "disable"
+        val js = "window.__makarena_ai_active = $isAIActive; document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: '$action' } }));"
+        webView.evaluateJavascript(js, null)
     }
 
     private fun triggerAIAnalysis() {
-        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'analyze' } }));"
+        val js = "window.__makarena_ai_active = true; document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'analyze' } }));"
         webView.evaluateJavascript(js, null)
     }
 
     private fun triggerPanicMode() {
-        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'panic' } }));"
+        isAIActive = false
+        val prefs = getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("is_ai_active", false).apply()
+        updateStatusPill(true)
+
+        val js = "window.__makarena_ai_active = false; document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'panic' } }));"
         webView.evaluateJavascript(js, null)
     }
 
@@ -472,6 +476,7 @@ class MainActivity : AppCompatActivity() {
                 val json = JSONObject(payload)
                 val action = json.optString("action")
                 if (action != "questionDataExtracted") return@launch
+                if (!isAIActive) return@launch
 
                 val data = json.getJSONObject("data")
                 val type = data.optString("type")
@@ -479,6 +484,13 @@ class MainActivity : AppCompatActivity() {
                 val isMultiple = (type == "multiple")
                 val imageUrl = data.optString("imageUrl", "")
                 val imageBase64 = if (imageUrl.isNotEmpty()) fetchImageBase64(imageUrl) else data.optString("imageBase64", null)
+
+                sendNativeLog("bridge_question_extracted", JSONObject().apply {
+                    put("type", type)
+                    put("question", question.take(120))
+                    put("isMultiple", isMultiple)
+                    put("hasImage", imageBase64 != null)
+                })
 
                 if (type == "closed" || type == "multiple") {
                     val optionsArr = data.getJSONArray("options")
@@ -495,14 +507,26 @@ class MainActivity : AppCompatActivity() {
                         imageBase64
                     )
 
+                    sendNativeLog("bridge_closed_resolved", JSONObject().apply {
+                        put("indices", JSONArray(correctIndices))
+                        put("optionsCount", options.size)
+                    })
+
                     withContext(Dispatchers.Main) {
+                        if (!isAIActive) return@withContext
                         val indicesStr = correctIndices.joinToString(",", "[", "]")
                         val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyClosed', correctIndices: $indicesStr } }));"
                         webView.evaluateJavascript(js, null)
                     }
                 } else if (type == "open") {
                     val answer = AIService.solveOpenQuestion(applicationContext, question, imageBase64)
+
+                    sendNativeLog("bridge_open_resolved", JSONObject().apply {
+                        put("answer", answer)
+                    })
+
                     withContext(Dispatchers.Main) {
+                        if (!isAIActive) return@withContext
                         val escaped = answer.replace("\"", "\\\"").replace("\n", " ")
                         val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyOpen', answerText: \"$escaped\" } }));"
                         webView.evaluateJavascript(js, null)

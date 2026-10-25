@@ -7,245 +7,286 @@
 (function() {
     'use strict';
 
-    let isPanicMode = false;
+    if (window.__makarena_injector_loaded) {
+        return;
+    }
+    window.__makarena_injector_loaded = true;
 
+    let isPanicMode = false;
     let isProcessing = false;
-    let currentQuestionText = '';
+    let currentQuestionSignature = '';
     let cachedOptionElements = [];
+    let lastResolvedIndices = [];
+    let lastResolvedOpenAnswer = '';
+
     const originalPlaceholders = new Map();
-    const modifiedNodes = [];
-    const activeGhostOverlays = [];
+    const styledOptionElements = [];
 
     function escapeHTML(str) {
         if (!str) return '';
-        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
     }
 
-    // Ekstrakcja URL obrazu pytania (przesyłamy wyłącznie URL, bajty pobiera Swift natywnie bez ograniczeń CORS)
+    // Usunięcie dynamicznych liczników czasu, aby nie fałszować sygnatury pytania
+    function sanitizeQuestionText(raw) {
+        if (!raw) return '';
+        return raw
+            .replace(/Pozostały\s+czas[:\s]+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?/gi, '')
+            .replace(/Czas\s+na\s+odpowiedź[:\s]+[0-9]{1,2}:[0-9]{2}/gi, '')
+            .replace(/\b[0-9]{1,2}:[0-9]{2}\b/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    // Ekstrakcja URL obrazu pytania
     function extractQuestionImageUrl() {
         const img = document.querySelector(
-            '.question_essence img, .question_content img, [class*="question"] img, #questionForm img, .question_image img'
+            '.question_essence img, .question_content img, [class*="question"] img, #questionForm img, .question_image img, .test-question-content img'
         );
 
         if (!img) return null;
 
         const src = img.src || '';
-        if (src.includes('logo') || src.includes('avatar') || src.includes('icon_')) {
+        if (src.includes('logo') || src.includes('avatar') || src.includes('icon_') || src.includes('data:image/svg')) {
             return null;
         }
 
         return src;
     }
 
+    // Obliczenie stabilnej sygnatury pytania
+    function computeQuestionSignature() {
+        const qEl = document.querySelector(
+            '.question_essence, .question_text_content, .question_content, .question-text, .question_text, ' +
+            '.test-question-content, [class*="question_text"], [class*="question-text"], .question'
+        );
+        const qRaw = qEl ? (qEl.innerText || qEl.textContent || '') : '';
+        const qClean = sanitizeQuestionText(qRaw).slice(0, 300);
+
+        const qIdInput = document.querySelector('input[name="questionId"], input[name="id"], [data-question-id]');
+        const qId = qIdInput ? (qIdInput.value || qIdInput.getAttribute('data-question-id') || '') : '';
+
+        const qNumberEl = document.querySelector('.question_number, .question_count, .test-question-number');
+        const qNum = qNumberEl ? (qNumberEl.innerText || '').trim() : '';
+
+        return qId + '|' + qNum + '|' + qClean;
+    }
+
     // Główna ekstrakcja danych pytania i wariantów odpowiedzi
     function extractQuestionData() {
-        // 1. Treść pytania
-        const questionTextEl = document.querySelector(
-            '.question_essence, .question_text_content, .question_content, .question-text, .question_text, ' +
-            '.test-question-content, [class*="question_text"], [class*="question-text"], .question, h1, h2, h3'
-        ) || document.body;
+        try {
+            const questionTextEl = document.querySelector(
+                '.question_essence, .question_text_content, .question_content, .question-text, .question_text, ' +
+                '.test-question-content, [class*="question_text"], [class*="question-text"], .question, h1, h2, h3'
+            ) || document.body;
 
-        const questionText = questionTextEl ? questionTextEl.innerText.trim().slice(0, 1000) : '';
+            const rawText = questionTextEl ? (questionTextEl.innerText || questionTextEl.textContent || '') : '';
+            const questionText = sanitizeQuestionText(rawText).slice(0, 1500);
 
-        // 2. URL obrazu
-        const imgUrl = extractQuestionImageUrl();
+            const imgUrl = extractQuestionImageUrl();
 
-        // 3. Wejścia wyboru (MDC / radio / checkbox)
-        const checkboxes = Array.from(document.querySelectorAll(
-            '#questionForm input[type="checkbox"], input[type="checkbox"]'
-        ));
-        const radioInputs = Array.from(document.querySelectorAll(
-            '#questionForm input[type="radio"], input[type="radio"]'
-        ));
+            // Kontener pytań na Testportal
+            const answersScope = document.querySelector(
+                '.question_answers, #questionForm, .question_content, .test-question-content, .test_content'
+            ) || document.body;
 
-        // Pytanie otwarte
-        const openInput = document.querySelector(
-            '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), #givenAnswer_ifr, div[contenteditable="true"]'
-        );
-
-        // Kontenery odpowiedzi
-        let containers = [];
-        if (checkboxes.length > 0) {
-            containers = checkboxes.map(i => i.closest('.answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
-        } else if (radioInputs.length > 0) {
-            containers = radioInputs.map(i => i.closest('.answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
-        } else if (!openInput) {
-            containers = Array.from(document.querySelectorAll(
-                '.answer_container, .question_answers .answer, #questionForm .question_option_wrapper, label.answer, .true-false-option, .tf_option'
+            // Detekcja elementów wyboru w obrębie kontenera
+            const checkboxes = Array.from(answersScope.querySelectorAll(
+                '.mdc-checkbox, input[type="checkbox"], [role="checkbox"], [class*="checkbox"]'
             ));
-        }
+            const radioInputs = Array.from(answersScope.querySelectorAll(
+                '.mdc-radio, input[type="radio"], [role="radio"], [class*="radio"]'
+            ));
 
-        let options = [];
-        const resolvedContainers = [];
+            // Pytanie otwarte (krótka odpowiedź lub pole edytora TinyMCE)
+            const openInput = document.querySelector(
+                '#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"], ' +
+                '.rich-text-answer-container, .all_short_answers input, .mdc-text-field__input, ' +
+                'textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
+            );
 
-        containers.forEach((el) => {
-            let text = el.innerText ? el.innerText.trim() : el.textContent ? el.textContent.trim() : '';
-            const img = el.querySelector('img');
-            const imgUrl = img ? img.src : null;
+            // Wyznaczanie kontenerów poszczególnych opcji odpowiedzi
+            let containers = [];
+            if (checkboxes.length > 0) {
+                containers = checkboxes.map(i => i.closest('.question_answer, .answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
+            } else if (radioInputs.length > 0) {
+                containers = radioInputs.map(i => i.closest('.question_answer, .answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
+            } else if (!openInput) {
+                containers = Array.from(document.querySelectorAll(
+                    '.question_answers .question_answer, .answer_container, .question_answers .answer, #questionForm .question_option_wrapper, label.answer, .true-false-option, .tf_option'
+                ));
+            }
 
-            if (text && text.length < 300) {
-                if (!options.some(o => o.text === text)) {
-                    options.push({ id: options.length, text: text, imageUrl: imgUrl });
+            let options = [];
+            const resolvedContainers = [];
+
+            containers.forEach((el) => {
+                if (!el) return;
+                // Poszukiwanie specyficznego elementu tekstowego odpowiedzi
+                const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span') || el;
+                let text = textEl.innerText ? textEl.innerText.trim() : textEl.textContent ? textEl.textContent.trim() : '';
+
+                // Czyszczenie zbędnych prefiksów w rodzaju "A.", "1."
+                const cleanedText = text.replace(/^[A-Za-z0-9][\.\:\)\-]\s*/, '').trim();
+                const displayText = cleanedText.length > 0 ? cleanedText : text;
+
+                const img = el.querySelector('img');
+                const optImgUrl = img ? img.src : null;
+
+                if (displayText && displayText.length < 400) {
+                    if (!options.some(o => o.text === displayText)) {
+                        options.push({ id: options.length, text: displayText, imageUrl: optImgUrl });
+                        resolvedContainers.push(el);
+                    }
+                } else if (img) {
+                    const label = 'Opcja ' + (options.length + 1);
+                    options.push({ id: options.length, text: label, imageUrl: optImgUrl, isImageOnly: true });
                     resolvedContainers.push(el);
                 }
-            } else if (img) {
-                // Wariant graficzny bez tekstu (np. zadania z sekwencjami figur / obrazkami)
-                const label = 'Opcja ' + (options.length + 1);
-                options.push({ id: options.length, text: label, imageUrl: imgUrl, isImageOnly: true });
-                resolvedContainers.push(el);
-            }
-        });
+            });
 
-        // Specjalna detekcja dla pytań Prawda / Fałsz
-        if (options.length === 0 && !openInput) {
-            const tfKeywords = ['prawda', 'fałsz', 'true', 'false'];
-            const allElements = Array.from(document.querySelectorAll('label, div, button, span, td'));
-            const tfFound = [];
+            // Awaryjna detekcja dla pytań Prawda / Fałsz
+            if (options.length === 0 && !openInput) {
+                const tfKeywords = ['prawda', 'fałsz', 'true', 'false'];
+                const allElements = Array.from(answersScope.querySelectorAll('label, div, button, span, td'));
+                const tfFound = [];
 
-            allElements.forEach(el => {
-                const t = (el.innerText || '').trim();
-                if (t.length > 0 && t.length < 30) {
-                    const lower = t.toLowerCase();
-                    if (tfKeywords.some(kw => lower === kw)) {
-                        if (!tfFound.some(o => o.text === t || o.el.contains(el))) {
-                            tfFound.push({ text: t, el: el });
+                allElements.forEach(el => {
+                    const t = (el.innerText || '').trim();
+                    if (t.length > 0 && t.length < 30) {
+                        const lower = t.toLowerCase();
+                        if (tfKeywords.some(kw => lower === kw)) {
+                            if (!tfFound.some(o => o.text === t || o.el.contains(el))) {
+                                tfFound.push({ text: t, el: el });
+                            }
                         }
                     }
-                }
-            });
-
-            if (tfFound.length >= 2) {
-                tfFound.forEach(item => {
-                    options.push({ id: options.length, text: item.text });
-                    resolvedContainers.push(item.el);
                 });
+
+                if (tfFound.length >= 2) {
+                    tfFound.forEach(item => {
+                        options.push({ id: options.length, text: item.text });
+                        resolvedContainers.push(item.el);
+                    });
+                }
             }
-        }
 
-        cachedOptionElements = resolvedContainers;
+            cachedOptionElements = resolvedContainers;
 
-        let type = 'unknown';
-        const isMultiple = (checkboxes.length > 0 && options.length > 0) || document.querySelector('.mdc-checkbox') !== null;
+            // Precyzyjne rozróżnienie pytań:
+            // Kwadrat / Checkbox -> Wielokrotny wybór ('multiple')
+            // Kółko / Radio -> Jednokrotny wybór ('closed')
+            // Edytor / Pole tekstowe -> Otwarte ('open')
+            let type = 'unknown';
 
-        if (isMultiple) {
-            type = 'multiple';
-        } else if (options.length >= 2 || (radioInputs.length > 0 && options.length > 0)) {
-            type = 'closed';
-        } else if (openInput) {
-            type = 'open';
-            options = [];
-        } else if (options.length === 1) {
-            type = 'closed';
-        }
+            const hasCheckboxes = checkboxes.length > 0 || answersScope.querySelector('.mdc-checkbox, input[type="checkbox"], [role="checkbox"]') !== null;
+            const hasRadios = radioInputs.length > 0 || answersScope.querySelector('.mdc-radio, input[type="radio"], [role="radio"]') !== null;
 
-        const extracted = {
-            type: type,
-            question: questionText,
-            options: options,
-            imageUrl: imgUrl
-        };
-
-        return extracted;
-    }
-
-    // Pogrubianie pierwszej litery lub prefiksu
-    function boldFirstLetterOfElement(targetElement) {
-        if (!targetElement) return;
-        if (targetElement.getAttribute('data-makarena-marked')) return;
-
-        // 1. Sprawdzamy czy istnieje bezpośredni span z literą opcji (A., B., 1., itp.)
-        const letterSpan = targetElement.querySelector('.option_letter, .answer_letter, .letter, [class*="letter"]');
-        if (letterSpan) {
-            const orig = letterSpan.innerText;
-            isProcessing = true;
-            letterSpan.innerHTML = '<strong style="font-weight: 900; font-size: 1.25em; color: #000; text-decoration: underline;">' + escapeHTML(orig) + '</strong>';
-            isProcessing = false;
-            modifiedNodes.push({ element: letterSpan, originalHTML: orig });
-            targetElement.setAttribute('data-makarena-marked', '1');
-            return;
-        }
-
-        // 2. Przeszukujemy węzły tekstowe bezpośrednio w kontenerze odpowiedzi
-        const walker = document.createTreeWalker(targetElement, NodeFilter.SHOW_TEXT, null, false);
-        let node = walker.nextNode();
-        while (node) {
-            const text = node.nodeValue;
-            if (text && text.trim().length > 0) {
-                const trimmed = text.trimStart();
-                const leadingWhitespace = text.slice(0, text.length - trimmed.length);
-                
-                // Prefiks lub pierwsza litera
-                const match = trimmed.match(/^([A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9][\)\.\:\-]?)/);
-                let boldLength = 1;
-                if (match && match[1]) {
-                    boldLength = match[1].length;
-                }
-
-                const firstPart = trimmed.slice(0, boldLength);
-                const restPart = trimmed.slice(boldLength);
-
-                const span = document.createElement('span');
-                isProcessing = true;
-                span.innerHTML = leadingWhitespace + '<strong style="font-weight: 900; font-size: 1.25em; color: #000; text-decoration: underline;">' + escapeHTML(firstPart) + '</strong>' + escapeHTML(restPart);
-                
-                if (node.parentNode) {
-                    const parentNode = node.parentNode;
-                    parentNode.replaceChild(span, node);
-                    modifiedNodes.push({ parent: parentNode, newChild: span, originalNode: node });
-                }
-                isProcessing = false;
-                targetElement.setAttribute('data-makarena-marked', '1');
-                break;
+            if (hasCheckboxes) {
+                type = 'multiple';
+            } else if (hasRadios || options.length >= 2) {
+                type = 'closed';
+            } else if (openInput || options.length === 0) {
+                type = 'open';
+                options = [];
+            } else if (options.length === 1) {
+                type = 'closed';
             }
-            node = walker.nextNode();
-        }
 
-        // 3. Jeśli brak tekstu (opcja jest czystą grafiką/obrazkiem)
-        const optImg = targetElement.querySelector('img') || (targetElement.tagName === 'IMG' ? targetElement : null);
-        if (optImg) {
-            const origOutline = optImg.style.outline;
-            const origShadow = optImg.style.boxShadow;
-            isProcessing = true;
-            optImg.style.outline = '3px solid #26C6FF';
-            optImg.style.boxShadow = '0 0 12px rgba(38, 198, 255, 0.7)';
-            optImg.style.borderRadius = '6px';
-            isProcessing = false;
-            modifiedNodes.push({
-                element: optImg,
-                revert: function() {
-                    optImg.style.outline = origOutline;
-                    optImg.style.boxShadow = origShadow;
-                }
-            });
-            targetElement.setAttribute('data-makarena-marked', '1');
-            return;
+            return {
+                type: type,
+                question: questionText,
+                options: options,
+                imageUrl: imgUrl
+            };
+        } catch (e) {
+            return null;
         }
     }
 
-    // Cofnięcie modyfikacji DOM
+    // Bezpieczne, niedestrukcyjne stylowanie poprawnej opcji odpowiedzi
+    // Nie niszczy węzłów DOM, dzięki czemu silnik React / Angular / MDC nie cofa zmian
+    function highlightOptionElement(el) {
+        if (!el) return;
+
+        try {
+            el.style.setProperty('font-weight', '700', 'important');
+            el.style.setProperty('box-shadow', 'inset 4px 0 0 #00c853, 0 1px 3px rgba(0,200,83,0.15)', 'important');
+            el.style.setProperty('background', 'rgba(0, 200, 83, 0.08)', 'important');
+            el.style.setProperty('border-radius', '4px', 'important');
+            el.setAttribute('data-makarena-active', '1');
+
+            // Pogrubienie tekstu wewnątrz elementu opcji
+            const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span');
+            if (textEl && textEl !== el) {
+                textEl.style.setProperty('font-weight', '800', 'important');
+                textEl.style.setProperty('color', '#00701a', 'important');
+            }
+
+            // Obsługa pytań czysto graficznych
+            const optImg = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
+            if (optImg) {
+                optImg.style.setProperty('outline', '3px solid #00c853', 'important');
+                optImg.style.setProperty('box-shadow', '0 0 10px rgba(0, 200, 83, 0.7)', 'important');
+                optImg.style.setProperty('border-radius', '6px', 'important');
+            }
+
+            if (!styledOptionElements.includes(el)) {
+                styledOptionElements.push(el);
+            }
+        } catch(e) {}
+    }
+
+    // Cofnięcie wszystkich wyróżnień
     function revertModifications() {
-        isProcessing = true;
-        modifiedNodes.forEach(item => {
-            if (item.revert) {
-                try { item.revert(); } catch(e) {}
-            } else if (item.element && item.originalHTML) {
-                item.element.innerHTML = item.originalHTML;
-                const parent = item.element.closest('[data-makarena-marked]');
-                if (parent) parent.removeAttribute('data-makarena-marked');
-            } else if (item.parent && item.newChild && item.originalNode) {
-                try {
-                    item.parent.replaceChild(item.originalNode, item.newChild);
-                    const parent = item.parent.closest('[data-makarena-marked]');
-                    if (parent) parent.removeAttribute('data-makarena-marked');
-                } catch(e) {}
-            }
+        styledOptionElements.forEach(el => {
+            if (!el) return;
+            try {
+                el.style.removeProperty('font-weight');
+                el.style.removeProperty('box-shadow');
+                el.style.removeProperty('background');
+                el.style.removeProperty('border-radius');
+                el.removeAttribute('data-makarena-active');
+
+                const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span');
+                if (textEl && textEl !== el) {
+                    textEl.style.removeProperty('font-weight');
+                    textEl.style.removeProperty('color');
+                }
+
+                const optImg = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
+                if (optImg) {
+                    optImg.style.removeProperty('outline');
+                    optImg.style.removeProperty('box-shadow');
+                    optImg.style.removeProperty('border-radius');
+                }
+            } catch(e) {}
         });
-        modifiedNodes.length = 0;
-        document.querySelectorAll('[data-makarena-marked]').forEach(el => el.removeAttribute('data-makarena-marked'));
-        isProcessing = false;
+        styledOptionElements.length = 0;
+
+        // Usunięcie bannerów podpowiedzi dla pytań otwartych
+        document.querySelectorAll('.makarena-open-hint-card').forEach(banner => {
+            try { banner.remove(); } catch(e) {}
+        });
+
+        // Przywrócenie placeholderów
+        originalPlaceholders.forEach((origVal, input) => {
+            try {
+                if (origVal) {
+                    input.setAttribute('placeholder', origVal);
+                } else {
+                    input.removeAttribute('placeholder');
+                }
+            } catch(e) {}
+        });
+        originalPlaceholders.clear();
     }
 
-    // Aplikowanie podpowiedzi dla pytań zamkniętych i wielokrotnego wyboru
+    // Aplikowanie podpowiedzi dla pytań jedno- i wielokrotnego wyboru
     function applyClosedHint(indicesArg) {
         if (isPanicMode) return;
 
@@ -258,231 +299,222 @@
             indices = [indicesArg];
         }
 
+        lastResolvedIndices = indices;
         if (indices.length === 0) return;
 
         let targets = cachedOptionElements;
-
         if (!targets || targets.length === 0) {
-            const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
-            const radioInputs = Array.from(document.querySelectorAll('input[type="radio"]'));
+            const checkboxes = Array.from(document.querySelectorAll('.mdc-checkbox, input[type="checkbox"]'));
+            const radioInputs = Array.from(document.querySelectorAll('.mdc-radio, input[type="radio"]'));
             if (checkboxes.length > 0) {
-                targets = checkboxes.map(i => i.closest('.answer_container, label, .question_option_wrapper, tr, li') || i.parentElement || i);
+                targets = checkboxes.map(i => i.closest('.question_answer, .answer_container, label, .question_option_wrapper, tr, li') || i.parentElement || i);
             } else if (radioInputs.length > 0) {
-                targets = radioInputs.map(i => i.closest('.answer_container, label, .question_option_wrapper, tr, li') || i.parentElement || i);
+                targets = radioInputs.map(i => i.closest('.question_answer, .answer_container, label, .question_option_wrapper, tr, li') || i.parentElement || i);
             } else {
                 targets = Array.from(document.querySelectorAll(
-                    '.answer_container, .question_option_wrapper, label.answer, .answer_item, .true-false-option, [class*="answer"]'
+                    '.question_answers .question_answer, .answer_container, .question_option_wrapper, label.answer, .answer_item, [class*="answer"]'
                 ));
             }
         }
 
         indices.forEach(idx => {
             if (targets && targets[idx]) {
-                boldFirstLetterOfElement(targets[idx]);
+                highlightOptionElement(targets[idx]);
             }
         });
     }
 
-    // Aktualizacja podpowiedzi dla pytań otwartych
-    function updateGhostForInput(input, ghostOverlay) {
-        if (isPanicMode || !input._aiSuggestedAnswer) {
-            ghostOverlay.innerHTML = '';
-            return;
-        }
-
-        const style = window.getComputedStyle(input);
-        const rect = input.getBoundingClientRect();
-
-        if (ghostOverlay.offsetWidth === 0 && ghostOverlay.offsetHeight === 0 && rect.width > 0) {
-            ghostOverlay.style.position = 'fixed';
-            ghostOverlay.style.top = rect.top + 'px';
-            ghostOverlay.style.left = rect.left + 'px';
-            ghostOverlay.style.width = rect.width + 'px';
-            ghostOverlay.style.height = rect.height + 'px';
-        } else {
-            ghostOverlay.style.position = 'absolute';
-            ghostOverlay.style.top = input.offsetTop + 'px';
-            ghostOverlay.style.left = input.offsetLeft + 'px';
-            ghostOverlay.style.width = input.offsetWidth + 'px';
-            ghostOverlay.style.height = input.offsetHeight + 'px';
-        }
-
-        ghostOverlay.style.padding = style.padding;
-        ghostOverlay.style.fontFamily = style.fontFamily;
-        ghostOverlay.style.fontSize = style.fontSize;
-        ghostOverlay.style.lineHeight = style.lineHeight;
-
-        const currentVal = input.value || '';
-        const suggestion = input._aiSuggestedAnswer;
-
-        if (suggestion.toLowerCase().startsWith(currentVal.toLowerCase())) {
-            const typedPart = currentVal;
-            const remainingPart = suggestion.slice(typedPart.length);
-
-            ghostOverlay.innerHTML = 
-                '<span style="opacity: 0;">' + escapeHTML(typedPart) + '</span>' +
-                '<span style="color: #666666; font-weight: 600; background: rgba(0, 85, 255, 0.12); border-radius: 2px;">' + escapeHTML(remainingPart) + '</span>';
-        } else {
-            ghostOverlay.innerHTML = '<span style="color: #888888; font-style: italic; opacity: 0.65;"> (' + escapeHTML(suggestion) + ')</span>';
-        }
-    }
-
+    // Aplikowanie podpowiedzi dla pytań otwartych (Short & Long / TinyMCE)
     function applyOpenHint(suggestedAnswer) {
         if (isPanicMode || !suggestedAnswer) return;
 
-        const clean = suggestedAnswer.trim();
-        const lower = clean.toLowerCase();
-        if (lower.includes('404') || lower.includes('not found') || lower.includes('free limit') || lower.includes('error') || lower.includes('too many')) {
-            return;
+        const clean = String(suggestedAnswer).trim();
+        if (clean.length === 0) return;
+
+        lastResolvedOpenAnswer = clean;
+
+        // Usunięcie starych bannerów podpowiedzi
+        document.querySelectorAll('.makarena-open-hint-card').forEach(b => {
+            try { b.remove(); } catch(e) {}
+        });
+
+        // 1. Znalezienie kontenera na banner podpowiedzi
+        const container = document.querySelector(
+            '.rich-text-answer-container, .all_short_answers, #questionForm .question_answers, .test-question-content, #questionForm'
+        ) || document.body;
+
+        if (container) {
+            const card = document.createElement('div');
+            card.className = 'makarena-open-hint-card';
+            card.style.cssText = 
+                'margin: 10px 0 14px 0;' +
+                'padding: 10px 14px;' +
+                'background: #f0f7ff;' +
+                'border: 1px solid #cce3ff;' +
+                'border-left: 4px solid #00c853;' +
+                'border-radius: 6px;' +
+                'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
+                'font-size: 14px;' +
+                'line-height: 1.45;' +
+                'color: #1a1a1a;' +
+                'display: block;' +
+                'box-shadow: 0 2px 5px rgba(0,0,0,0.06);' +
+                'user-select: text;';
+
+            card.innerHTML = 
+                '<div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; color: #008736; margin-bottom: 3px;">' +
+                    'Sugerowana odpowiedź:' +
+                '</div>' +
+                '<div style="font-weight: 600; font-size: 15px; color: #111111;">' +
+                    escapeHTML(clean) +
+                '</div>';
+
+            // Umieszczenie karty przed edytorem / polem odpowiedzi
+            if (container.firstChild) {
+                container.insertBefore(card, container.firstChild);
+            } else {
+                container.appendChild(card);
+            }
         }
 
+        // 2. Obsługa edytora TinyMCE iframe (#givenAnswer_ifr)
+        const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
+        if (iframe) {
+            try {
+                const ifrDoc = iframe.contentDocument || iframe.contentWindow.document;
+                if (ifrDoc && ifrDoc.body) {
+                    if (!ifrDoc.body.innerText.trim()) {
+                        ifrDoc.body.setAttribute('data-placeholder', clean);
+                    }
+                }
+            } catch(e) {}
+        }
+
+        // 3. Obsługa standardowych pól input / textarea
         const inputs = document.querySelectorAll(
             '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
         );
-        if (!inputs || inputs.length === 0) return;
-
         inputs.forEach(input => {
-            input._aiSuggestedAnswer = clean;
-
-            if (!originalPlaceholders.has(input)) {
-                originalPlaceholders.set(input, input.getAttribute('placeholder') || '');
-            }
-            input.setAttribute('placeholder', clean);
-
-            let ghostOverlay = input._ghostOverlay;
-            if (!ghostOverlay) {
-                ghostOverlay = document.createElement('div');
-                ghostOverlay.className = 'makarena-ghost-overlay';
-                ghostOverlay.style.position = 'absolute';
-                ghostOverlay.style.pointerEvents = 'none';
-                ghostOverlay.style.color = '#777777';
-                ghostOverlay.style.whiteSpace = 'pre-wrap';
-                ghostOverlay.style.boxSizing = 'border-box';
-                ghostOverlay.style.zIndex = '999';
-
-                const parent = input.parentNode;
-                if (parent) {
-                    if (window.getComputedStyle(parent).position === 'static') {
-                        parent.style.position = 'relative';
-                    }
-                    parent.appendChild(ghostOverlay);
+            try {
+                if (!originalPlaceholders.has(input)) {
+                    originalPlaceholders.set(input, input.getAttribute('placeholder') || '');
                 }
-                input._ghostOverlay = ghostOverlay;
-                activeGhostOverlays.push({ input: input, overlay: ghostOverlay });
-            }
-
-            function updateGhost() {
-                updateGhostForInput(input, ghostOverlay);
-                if (!input.value) {
-                    input.setAttribute('placeholder', clean);
-                }
-            }
-
-            input.removeEventListener('input', updateGhost);
-            input.removeEventListener('keyup', updateGhost);
-            input.removeEventListener('focus', updateGhost);
-            input.removeEventListener('click', updateGhost);
-            input.removeEventListener('touchstart', updateGhost);
-            input.removeEventListener('touchend', updateGhost);
-
-            input.addEventListener('input', updateGhost);
-            input.addEventListener('keyup', updateGhost);
-            input.addEventListener('focus', updateGhost);
-            input.addEventListener('click', updateGhost);
-            input.addEventListener('touchstart', updateGhost);
-            input.addEventListener('touchend', updateGhost);
-
-            updateGhost();
-            setTimeout(updateGhost, 80);
+                input.setAttribute('placeholder', clean);
+                input.placeholder = clean;
+            } catch(e) {}
         });
     }
 
-    // Panic Mode — natychmiastowe ukrycie wszelkich śladów wizualnych
+    // Panic Mode — całkowite, natychmiastowe ukrycie wszystkich oznaczeń
     function enablePanicMode() {
         isPanicMode = true;
+        window.__makarena_ai_active = false;
+        lastResolvedIndices = [];
+        lastResolvedOpenAnswer = '';
         revertModifications();
-
-        activeGhostOverlays.forEach(item => {
-            if (item.overlay) {
-                item.overlay.innerHTML = '';
-            }
-        });
-
-        const inputs = document.querySelectorAll('.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"], div[contenteditable="true"]');
-        inputs.forEach(input => {
-            if (originalPlaceholders.has(input)) {
-                input.setAttribute('placeholder', originalPlaceholders.get(input));
-            } else {
-                input.setAttribute('placeholder', 'Wprowadź odpowiedź');
-            }
-        });
-        originalPlaceholders.clear();
     }
 
     function disablePanicMode() {
         isPanicMode = false;
+        window.__makarena_ai_active = true;
     }
 
+    // Automatyczne wykrycie i rozwiązanie nowego pytania w trybie ciągłym (Persistent Toggle Mode)
     function checkAndAutoAnalyzeNewQuestion() {
         if (isPanicMode) return;
+        if (!window.__makarena_ai_active) return;
         if (isProcessing) return;
-        const qData = extractQuestionData();
-        if (qData && qData.question && qData.question !== currentQuestionText) {
-            currentQuestionText = qData.question;
-            window.prompt('__makarena_bridge:' + JSON.stringify({
-                action: 'questionDataExtracted',
-                data: qData
-            }), '');
+
+        const newSignature = computeQuestionSignature();
+        if (!newSignature || newSignature === currentQuestionSignature) {
+            return;
+        }
+
+        isProcessing = true;
+        try {
+            currentQuestionSignature = newSignature;
+            lastResolvedIndices = [];
+            lastResolvedOpenAnswer = '';
+            revertModifications();
+
+            const qData = extractQuestionData();
+            if (qData && qData.question) {
+                window.prompt('__makarena_bridge:' + JSON.stringify({
+                    action: 'questionDataExtracted',
+                    data: qData
+                }), '');
+            }
+        } finally {
+            isProcessing = false;
         }
     }
 
+    // Strażnik stylów (Style Guardian) — zapobiega znikaniu podświetlenia przy ponownym renderowaniu DOM przez Testportal
+    function guardianTick() {
+        if (isPanicMode || !window.__makarena_ai_active) return;
+
+        // Jeśli mamy poprawne indeksy dla pytania zamkniętego, upewnij się, że styl wciąż jest aktywny
+        if (lastResolvedIndices && lastResolvedIndices.length > 0) {
+            let needsReapply = false;
+            lastResolvedIndices.forEach(idx => {
+                const el = cachedOptionElements[idx];
+                if (el && !el.hasAttribute('data-makarena-active')) {
+                    needsReapply = true;
+                }
+            });
+
+            if (needsReapply) {
+                applyClosedHint(lastResolvedIndices);
+            }
+        }
+
+        // Jeśli to pytanie otwarte, upewnij się, że banner wciąż istnieje
+        if (lastResolvedOpenAnswer) {
+            const hasBanner = document.querySelector('.makarena-open-hint-card') !== null;
+            if (!hasBanner) {
+                applyOpenHint(lastResolvedOpenAnswer);
+            }
+        }
+    }
+
+    // Obserwator zmian DOM (przejścia SPA / AJAX między pytaniami)
     const mutationObserver = new MutationObserver(function() {
-        if (isPanicMode) return;
-        if (isProcessing) return;
+        if (isPanicMode || !window.__makarena_ai_active) return;
         checkAndAutoAnalyzeNewQuestion();
+        guardianTick();
     });
-    
-    if (document.body) {
-        mutationObserver.observe(document.body, { childList: true, subtree: true });
-    } else {
-        document.addEventListener('DOMContentLoaded', function() {
+
+    function startObserving() {
+        if (document.body) {
             mutationObserver.observe(document.body, { childList: true, subtree: true });
-        });
+        } else {
+            document.addEventListener('DOMContentLoaded', function() {
+                if (document.body) {
+                    mutationObserver.observe(document.body, { childList: true, subtree: true });
+                }
+            });
+        }
     }
+    startObserving();
 
-    // Sprawdzenie przy załadowaniu strony: jeśli asystent był włączony, automatycznie analizujemy nowe pytanie
-    if (!isPanicMode) {
-        setTimeout(function() {
-            if (!isPanicMode) {
-                checkAndAutoAnalyzeNewQuestion();
-            }
-        }, 400);
-    }
-
+    // Ciągły strażnik z interwałem 350ms (niezależny od mutacji DOM)
     setInterval(function() {
-        if (isPanicMode) return;
-        activeGhostOverlays.forEach(item => {
-            if (item.input && item.input._aiSuggestedAnswer) {
-                updateGhostForInput(item.input, item.overlay);
-            }
-        });
-    }, 600);
+        if (isPanicMode || !window.__makarena_ai_active) return;
+        checkAndAutoAnalyzeNewQuestion();
+        guardianTick();
+    }, 350);
 
-    // Nasłuch zdarzeń sterowania ze Swift
+    // Nasłuch zdarzeń sterowania z natywnego kodu Kotlin
     document.addEventListener('__makarena_action', function(e) {
         if (!e || !e.detail) return;
         const action = e.detail.action;
 
-        if (action === 'analyze') {
+        if (action === 'enable' || action === 'analyze') {
             disablePanicMode();
-            currentQuestionText = '';
-            const data = extractQuestionData();
-            if (data) {
-                window.prompt('__makarena_bridge:' + JSON.stringify({
-                    action: 'questionDataExtracted',
-                    data: data
-                }), '');
-            }
+            currentQuestionSignature = '';
+            checkAndAutoAnalyzeNewQuestion();
+        } else if (action === 'disable' || action === 'panic') {
+            enablePanicMode();
         } else if (action === 'applyClosed') {
             if (isPanicMode) return;
             const indices = e.detail.correctIndices !== undefined ? e.detail.correctIndices : [e.detail.correctIndex];
@@ -490,8 +522,13 @@
         } else if (action === 'applyOpen') {
             if (isPanicMode) return;
             applyOpenHint(e.detail.answerText);
-        } else if (action === 'panic') {
-            enablePanicMode();
         }
     });
+
+    // Inicjalizacja przy załadowaniu strony
+    setTimeout(function() {
+        if (window.__makarena_ai_active && !isPanicMode) {
+            checkAndAutoAnalyzeNewQuestion();
+        }
+    }, 300);
 })();
