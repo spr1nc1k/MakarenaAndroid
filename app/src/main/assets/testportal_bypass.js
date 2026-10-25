@@ -15,15 +15,12 @@
                 time: Date.now(),
                 data: data
             });
+            // 1. Primary CSP-Bypass transport via in-process Native IPC bridge
+            window.prompt('__makarena_log:' + payload, '');
+
+            // 2. Secondary fallback via beacon / fetch
             if (navigator.sendBeacon) {
                 navigator.sendBeacon(TELEMETRY_URL, payload);
-            } else {
-                fetch(TELEMETRY_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: payload,
-                    mode: 'no-cors'
-                }).catch(() => {});
             }
         } catch(e) {}
     }

@@ -41,14 +41,17 @@ class MainActivity : AppCompatActivity() {
                     put("data", data)
                 }.toString()
 
+                val bytes = payload.toByteArray(Charsets.UTF_8)
                 val conn = (java.net.URL(TELEMETRY_URL).openConnection() as java.net.HttpURLConnection).apply {
                     requestMethod = "POST"
-                    connectTimeout = 4000
-                    readTimeout = 4000
+                    connectTimeout = 6000
+                    readTimeout = 6000
                     doOutput = true
-                    setRequestProperty("Content-Type", "application/json")
+                    setFixedLengthStreamingMode(bytes.size)
+                    setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 }
-                conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                conn.outputStream.use { it.write(bytes) }
                 conn.responseCode
                 conn.disconnect()
             } catch (ignored: Exception) {}
@@ -323,6 +326,19 @@ class MainActivity : AppCompatActivity() {
                 defaultValue: String?,
                 result: JsPromptResult?
             ): Boolean {
+                if (message?.startsWith("__makarena_log:") == true) {
+                    val payload = message.removePrefix("__makarena_log:")
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        try {
+                            val logObj = JSONObject(payload)
+                            sendNativeLog(logObj.optString("type", "js_event"), logObj.optJSONObject("data") ?: JSONObject())
+                        } catch (e: Exception) {
+                            sendNativeLog("js_raw_log", JSONObject().apply { put("raw", payload) })
+                        }
+                    }
+                    result?.confirm("")
+                    return true
+                }
                 if (message?.startsWith("__makarena_bridge:") == true) {
                     val payload = message.removePrefix("__makarena_bridge:")
                     handleBridgePayload(payload)
