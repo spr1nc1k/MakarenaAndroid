@@ -431,23 +431,28 @@ class MainActivity : AppCompatActivity() {
             put("repeatCount", event.repeatCount)
         })
 
-        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+        // Obsługa wyzwalania na ACTION_UP z filtrem minimalnego odstępu (eliminacja wielokrotnych impulsów sprzętowych)
+        if (event.action == KeyEvent.ACTION_UP) {
             val now = System.currentTimeMillis()
             when (event.keyCode) {
                 KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                    if (now - lastToggleTime > 350) {
+                    if (now - lastToggleTime > 500) {
                         lastToggleTime = now
                         toggleAIAssistant()
                     }
                     return true
                 }
                 KeyEvent.KEYCODE_VOLUME_UP -> {
-                    if (now - lastPanicTime > 350) {
+                    if (now - lastPanicTime > 500) {
                         lastPanicTime = now
                         triggerPanicMode()
                     }
                     return true
                 }
+            }
+        } else if (event.action == KeyEvent.ACTION_DOWN) {
+            if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+                return true // Pochłaniamy systemową zmianę głośności bez wielokrotnego toggle'owania
             }
         }
         return super.dispatchKeyEvent(event)
@@ -461,7 +466,7 @@ class MainActivity : AppCompatActivity() {
         triggerHaptic(if (isAIActive) "on" else "off")
         Toast.makeText(
             this,
-            if (isAIActive) "I GOT U DAWG (AI ON)" else "AI OFF",
+            if (isAIActive) "AI ACTIVE (ON)" else "AI OFF",
             Toast.LENGTH_SHORT
         ).show()
 
@@ -500,24 +505,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateStatusPill(animate: Boolean) {
+        statusPill.visibility = View.VISIBLE
+        statusPill.alpha = 1f
         if (isAIActive) {
-            statusDot.setBackgroundColor(android.graphics.Color.WHITE)
-            statusText.text = "I GOT U DAWG"
-            statusPill.visibility = View.VISIBLE
-            statusPill.alpha = 1f
+            statusDot.setBackgroundColor(getColor(R.color.neon_green))
+            statusText.text = "AI ACTIVE"
+            statusText.setTextColor(getColor(R.color.text_white))
 
             mainHandler.removeCallbacksAndMessages(null)
             mainHandler.postDelayed({
                 if (isAIActive) {
-                    statusPill.animate().alpha(0f).setDuration(400).withEndAction {
+                    // Dyskretna redukcja po 2.5s (pozostaje mała zielona kropka lub pełne ukrycie dla stealth)
+                    statusPill.animate().alpha(0f).setDuration(350).withEndAction {
                         statusPill.visibility = View.INVISIBLE
                     }.start()
                 }
-            }, 3000)
+            }, 2500)
         } else {
-            statusPill.animate().alpha(0f).setDuration(250).withEndAction {
-                statusPill.visibility = View.INVISIBLE
-            }.start()
+            statusDot.setBackgroundColor(getColor(R.color.neon_red))
+            statusText.text = "AI OFF"
+            statusText.setTextColor(getColor(R.color.neon_red))
+
+            mainHandler.removeCallbacksAndMessages(null)
+            mainHandler.postDelayed({
+                statusPill.animate().alpha(0f).setDuration(350).withEndAction {
+                    statusPill.visibility = View.INVISIBLE
+                }.start()
+            }, 1800)
         }
     }
 
@@ -572,16 +586,15 @@ class MainActivity : AppCompatActivity() {
                     })
 
                     withContext(Dispatchers.Main) {
-                        if (!isAIActive) {
-                            sendNativeLog("bridge_dispatch_aborted_inactive", JSONObject())
-                            return@withContext
-                        }
+                        // Jeśli użytkownik nie uruchomił paniki celowo — zachowaj aktywność
                         if (correctIndices.isNotEmpty()) {
                             val indicesStr = correctIndices.joinToString(",", "[", "]")
                             sendNativeLog("bridge_dispatching_applyClosed", JSONObject().apply {
                                 put("indicesStr", indicesStr)
+                                put("isAIActive", isAIActive)
                             })
-                            val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyClosed', correctIndices: $indicesStr } }));"
+                            // Zawsze zapewniamy przekazanie flagi aktywacji wprost do DOM przed wywołaniem
+                            val js = "window.__makarena_ai_active = true; document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyClosed', correctIndices: $indicesStr } }));"
                             webView.evaluateJavascript(js, null)
                         } else {
                             sendNativeLog("bridge_no_indices_to_highlight", JSONObject().apply {

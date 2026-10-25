@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Pure Monochrome Cyber Aesthetics (Czarno - Białe) -->
+    <!-- Cyber Aesthetics matching iOS (Green/Red indicators) -->
     <color name="oled_black">#000000</color>
     <color name="glass_surface">#0C0C0C</color>
-    <color name="neon_cyan">#FFFFFF</color>
-    <color name="neon_purple">#CCCCCC</color>
-    <color name="neon_green">#FFFFFF</color>
-    <color name="neon_red">#666666</color>
+    <color name="neon_cyan">#26C6DA</color>
+    <color name="neon_purple">#AB47BC</color>
+    <color name="neon_green">#00E676</color>
+    <color name="neon_red">#FF1744</color>
     <color name="text_white">#FFFFFF</color>
     <color name="text_muted">#8A8A8A</color>
     <color name="border_glass">#26FFFFFF</color>
