@@ -1,10 +1,10 @@
 // testportal_bypass.js
-// 100% Native-Spoofed Stealth Engine for Testportal & Safari Environment Parity
+// 100% Native-Spoofed Stealth Engine for Testportal & Mobile Chrome Environment Parity
 
 (function() {
     'use strict';
 
-    // 1. Function.prototype.toString Spoofing via WeakMap (0 properties, 0 symbols)
+    // 1. Function.prototype.toString Spoofing via WeakMap (0 custom properties, 0 symbols)
     const originalToString = Function.prototype.toString;
     const nativeCodeMap = new WeakMap();
 
@@ -36,20 +36,46 @@
         });
     } catch(e) {}
 
-    // 2. Window.prototype Dimensions Parity with Illegal Invocation enforcement
+    // 2. Universal Native Code Regex Bypass (RegExp.prototype.test)
+    // Neutralizes integrity scans checking for native functions
+    try {
+        const originalRegExpTest = RegExp.prototype.test;
+        const hookedRegExpTest = setNativeToString(function test(str) {
+            const pattern = String(this);
+            if (pattern.includes('native code') || pattern.includes('[native code]')) {
+                return true;
+            }
+            return originalRegExpTest.call(this, str);
+        }, 'test');
+
+        Object.defineProperty(RegExp.prototype, 'test', {
+            value: hookedRegExpTest,
+            writable: true,
+            enumerable: false,
+            configurable: true
+        });
+    } catch(e) {}
+
+    // 3. Neutralize Testportal Telemetry & Error Logging (logToServer)
+    // Completely shuts down the reporting pipeline for errors, blurs, and extension alerts
+    const dummyLogToServer = setNativeToString(function logToServer() { return false; }, 'logToServer');
+    try {
+        Object.defineProperty(window, 'logToServer', {
+            get: function() { return dummyLogToServer; },
+            set: function() {},
+            configurable: true,
+            enumerable: true
+        });
+    } catch(e) {}
+
+    // 4. Window Outer Dimensions Parity
     try {
         const outerWidthGetter = setNativeToString(function() {
-            if (!(this instanceof Window) && this !== window) {
-                throw new TypeError("Illegal invocation");
-            }
-            return window.innerWidth || 390;
+            return window.innerWidth || 412;
         }, 'get outerWidth');
 
         const outerHeightGetter = setNativeToString(function() {
-            if (!(this instanceof Window) && this !== window) {
-                throw new TypeError("Illegal invocation");
-            }
-            return window.innerHeight || 844;
+            return window.innerHeight || 915;
         }, 'get outerHeight');
 
         Object.defineProperty(Window.prototype, 'outerWidth', {
@@ -64,98 +90,101 @@
         });
     } catch(e) {}
 
-    // 3. Document.prototype Focus & Visibility Parity with Illegal Invocation enforcement
+    // 5. Document Focus & Visibility Parity (Non-enumerable Web IDL standard, safe across iframes)
     try {
         const visStateGetter = setNativeToString(function() {
-            if (!(this instanceof Document) && this !== document) {
-                throw new TypeError("Illegal invocation");
-            }
             return 'visible';
         }, 'get visibilityState');
 
         Object.defineProperty(Document.prototype, 'visibilityState', {
             get: visStateGetter,
-            enumerable: true,
+            enumerable: false,
             configurable: true
         });
 
         const hiddenGetter = setNativeToString(function() {
-            if (!(this instanceof Document) && this !== document) {
-                throw new TypeError("Illegal invocation");
-            }
             return false;
         }, 'get hidden');
 
         Object.defineProperty(Document.prototype, 'hidden', {
             get: hiddenGetter,
-            enumerable: true,
+            enumerable: false,
             configurable: true
         });
 
         const hasFocusFn = setNativeToString(function hasFocus() {
-            if (!(this instanceof Document) && this !== document) {
-                throw new TypeError("Illegal invocation");
-            }
             return true;
         }, 'hasFocus');
 
         Object.defineProperty(Document.prototype, 'hasFocus', {
             value: hasFocusFn,
             writable: true,
+            enumerable: false,
+            configurable: true
+        });
+    } catch(e) {}
+
+    // 6. Android Chrome Environment Parity
+    try {
+        Object.defineProperty(Navigator.prototype, 'vendor', {
+            get: setNativeToString(function() { return 'Google Inc.'; }, 'get vendor'),
+            enumerable: true,
+            configurable: true
+        });
+        Object.defineProperty(Navigator.prototype, 'webdriver', {
+            get: setNativeToString(function() { return false; }, 'get webdriver'),
+            enumerable: true,
+            configurable: true
+        });
+        Object.defineProperty(Navigator.prototype, 'maxTouchPoints', {
+            get: setNativeToString(function() { return 5; }, 'get maxTouchPoints'),
+            enumerable: true,
+            configurable: true
+        });
+        Object.defineProperty(Navigator.prototype, 'platform', {
+            get: setNativeToString(function() { return 'Linux armv8l'; }, 'get platform'),
             enumerable: true,
             configurable: true
         });
     } catch(e) {}
 
-    // 4. Safari Environment Emulation (Matches iOS WebKit profile 1:1)
-    if (!('ApplePaySession' in window)) {
-        try {
-            Object.defineProperty(window, 'ApplePaySession', {
-                value: setNativeToString(function ApplePaySession() {}, 'ApplePaySession'),
-                writable: false,
-                configurable: true,
-                enumerable: false
+    // Sanitize navigator.userAgentData: purge 'Android WebView' brand and emulate authentic Chrome
+    try {
+        const standardBrands = [
+            { brand: 'Google Chrome', version: '131' },
+            { brand: 'Chromium', version: '131' },
+            { brand: 'Not_A Brand', version: '24' }
+        ];
+
+        if (navigator.userAgentData) {
+            Object.defineProperty(navigator.userAgentData, 'brands', {
+                get: setNativeToString(function() { return standardBrands; }, 'get brands'),
+                enumerable: true,
+                configurable: true
             });
-        } catch(e) {}
-    }
-
-    try {
-        Object.defineProperty(Navigator.prototype, 'standalone', {
-            get: setNativeToString(function() { return false; }, 'get standalone'),
-            configurable: true,
-            enumerable: true
-        });
-        Object.defineProperty(Navigator.prototype, 'webdriver', {
-            get: setNativeToString(function() { return false; }, 'get webdriver'),
-            configurable: true,
-            enumerable: true
-        });
-        Object.defineProperty(Navigator.prototype, 'vendor', {
-            get: setNativeToString(function() { return 'Apple Computer, Inc.'; }, 'get vendor'),
-            configurable: true,
-            enumerable: true
-        });
-        Object.defineProperty(Navigator.prototype, 'maxTouchPoints', {
-            get: setNativeToString(function() { return 5; }, 'get maxTouchPoints'),
-            configurable: true,
-            enumerable: true
-        });
-    } catch(e) {}
-
-    // Strip Chromium-specific footprints that trigger desktop extension checks
-    try {
-        if ('chrome' in window) {
-            delete window.chrome;
+            Object.defineProperty(navigator.userAgentData, 'platform', {
+                get: setNativeToString(function() { return 'Android'; }, 'get platform'),
+                enumerable: true,
+                configurable: true
+            });
+            Object.defineProperty(navigator.userAgentData, 'mobile', {
+                get: setNativeToString(function() { return true; }, 'get mobile'),
+                enumerable: true,
+                configurable: true
+            });
         }
     } catch(e) {}
 
+    // Ensure window.chrome matches real mobile Chrome (empty object, NO desktop .app property)
     try {
-        if ('userAgentData' in navigator) {
-            delete Navigator.prototype.userAgentData;
+        if (!window.chrome) {
+            window.chrome = {};
+        } else if ('app' in window.chrome) {
+            delete window.chrome.app;
         }
     } catch(e) {}
 
-    // 5. Native Event Interception with Bidirectional WeakMap (Transparent removeEventListener support)
+    // 7. Event Interception with Bidirectional WeakMap (Transparent removeEventListener support)
     const BLOCKED_EVENTS = new Set(['blur', 'focusout', 'visibilitychange', 'pagehide', 'freeze']);
     const originalAddEventListener = EventTarget.prototype.addEventListener;
     const originalRemoveEventListener = EventTarget.prototype.removeEventListener;
@@ -183,7 +212,7 @@
             };
 
             setNativeToString(safeListener, (listener && listener.name) || 'listener');
-            if (listener && typeof listener === 'object' || typeof listener === 'function') {
+            if (listener && (typeof listener === 'object' || typeof listener === 'function')) {
                 listenerMap.set(listener, safeListener);
             }
             return originalAddEventListener.call(this, type, safeListener, options);
@@ -209,7 +238,7 @@
         EventTarget.prototype.removeEventListener = wrappedRemoveEventListener;
     } catch(e) {}
 
-    // 6. Global Capture-Phase Suppressors for OS Loss-of-Focus
+    // 8. Global Capture-Phase Suppressors for OS Loss-of-Focus on Window & Document
     BLOCKED_EVENTS.forEach(eventName => {
         originalAddEventListener.call(window, eventName, setNativeToString(function(e) {
             if (e && e.isTrusted === true) {
@@ -218,6 +247,22 @@
                 try { if (e.preventDefault) e.preventDefault(); } catch(err) {}
             }
         }, 'suppressor'), true);
+
+        originalAddEventListener.call(document, eventName, setNativeToString(function(e) {
+            if (e && e.isTrusted === true) {
+                try { e.stopImmediatePropagation(); } catch(err) {}
+                try { e.stopPropagation(); } catch(err) {}
+                try { if (e.preventDefault) e.preventDefault(); } catch(err) {}
+            }
+        }, 'suppressor'), true);
     });
+
+    // 9. Suppress Unhandled Error Logging
+    window.addEventListener('error', function(e) {
+        if (e && e.stopImmediatePropagation) {
+            try { e.stopImmediatePropagation(); } catch(err) {}
+        }
+        return true;
+    }, true);
 
 })();

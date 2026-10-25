@@ -101,15 +101,16 @@ class MainActivity : AppCompatActivity() {
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         settings.cacheMode = WebSettings.LOAD_DEFAULT
 
-        // Autentyczny User-Agent Apple Safari (identyczny z wersją iOS, eliminujący testy rozszerzeń Chrome)
-        settings.userAgentString = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/605.1.15"
+        // Autentyczny User-Agent Google Chrome dla Android (zgodny ze specyfikacją User-Agent Reduction)
+        val chromeUserAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+        settings.userAgentString = chromeUserAgent
 
         // Wymuszenie fokusu systemowego dla WebView (zapobiega utracie focusu na rzecz EditText paska URL)
         webView.isFocusable = true
         webView.isFocusableInTouchMode = true
         webView.requestFocus()
 
-        // 2. Całkowite wyłączenie nagłówka X-Requested-With (identyfikatora WebView)
+        // 2. Całkowite wyłączenie nagłówka X-Requested-With (identyfikatora WebView) na poziomie API AndroidX
         if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
             WebSettingsCompat.setRequestedWithHeaderOriginAllowList(settings, emptySet())
         }
@@ -124,6 +125,81 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 return false
+            }
+
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                val url = request?.url ?: return null
+                val urlStr = url.toString()
+                if (!urlStr.startsWith("http://") && !urlStr.startsWith("https://")) {
+                    return null
+                }
+
+                val host = url.host ?: ""
+                if (host.contains("testportal.pl") || host.contains("testportal.net") || host.contains("testportal.com")) {
+                    if (request.method.equals("GET", ignoreCase = true)) {
+                        try {
+                            val conn = (java.net.URL(urlStr).openConnection() as java.net.HttpURLConnection).apply {
+                                requestMethod = "GET"
+                                instanceFollowRedirects = false
+                                connectTimeout = 8000
+                                readTimeout = 8000
+
+                                request.requestHeaders?.forEach { (key, value) ->
+                                    if (!key.equals("X-Requested-With", ignoreCase = true)) {
+                                        setRequestProperty(key, value)
+                                    }
+                                }
+
+                                val cookie = CookieManager.getInstance().getCookie(urlStr)
+                                if (!cookie.isNullOrEmpty()) {
+                                    setRequestProperty("Cookie", cookie)
+                                }
+
+                                if (getRequestProperty("User-Agent") == null) {
+                                    setRequestProperty("User-Agent", chromeUserAgent)
+                                }
+                            }
+
+                            conn.connect()
+
+                            conn.headerFields?.forEach { (key, values) ->
+                                if (key != null && key.equals("Set-Cookie", ignoreCase = true)) {
+                                    values.forEach { cookieVal ->
+                                        CookieManager.getInstance().setCookie(urlStr, cookieVal)
+                                    }
+                                }
+                            }
+
+                            val contentType = conn.contentType ?: "text/html"
+                            val mimeType = contentType.split(";").firstOrNull()?.trim() ?: "text/html"
+                            val encoding = if (contentType.contains("charset=", ignoreCase = true)) {
+                                contentType.split("charset=").getOrNull(1)?.trim() ?: "utf-8"
+                            } else {
+                                "utf-8"
+                            }
+
+                            val responseHeaders = mutableMapOf<String, String>()
+                            conn.headerFields?.forEach { (k, v) ->
+                                if (k != null && v.isNotEmpty()) {
+                                    responseHeaders[k] = v.joinToString(", ")
+                                }
+                            }
+
+                            val statusCode = conn.responseCode
+                            val reasonPhrase = conn.responseMessage?.ifEmpty { "OK" } ?: "OK"
+                            val inputStream = if (statusCode in 200..399) {
+                                conn.inputStream
+                            } else {
+                                conn.errorStream ?: conn.inputStream
+                            }
+
+                            return WebResourceResponse(mimeType, encoding, statusCode, reasonPhrase, responseHeaders, inputStream)
+                        } catch (e: Exception) {
+                            return null
+                        }
+                    }
+                }
+                return null
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
