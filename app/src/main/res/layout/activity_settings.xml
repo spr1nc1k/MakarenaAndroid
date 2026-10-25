@@ -15,7 +15,7 @@
             android:layout_height="wrap_content"
             android:fontFamily="monospace"
             android:text="WHITE SOLUTION ENGINE"
-            android:textColor="@color/neon_cyan"
+            android:textColor="@color/text_white"
             android:textSize="12sp"
             android:textStyle="bold" />
 
@@ -41,7 +41,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Klucz Gemini 2.0 Flash Vision (Zalecany)"
-                android:textColor="@color/neon_cyan"
+                android:textColor="@color/text_white"
                 android:textSize="14sp"
                 android:textStyle="bold" />
 
@@ -75,7 +75,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:text="Otwórz Google AI Studio i pobierz darmowy klucz"
-                android:textColor="@color/neon_cyan"
+                android:textColor="@color/text_white"
                 android:textSize="11sp" />
         </LinearLayout>
 
@@ -110,7 +110,7 @@
             android:layout_width="match_parent"
             android:layout_height="50dp"
             android:layout_marginTop="26dp"
-            android:backgroundTint="@color/neon_cyan"
+            android:backgroundTint="@color/text_white"
             android:text="ZAPISZ I WRÓĆ"
             android:textColor="@color/oled_black"
             android:textStyle="bold" />

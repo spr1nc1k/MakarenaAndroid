@@ -36,7 +36,7 @@
             android:layout_marginTop="6dp"
             android:fontFamily="monospace"
             android:letterSpacing="0.15"
-            android:text="I got you dawg"
+            android:text="I got u dawg"
             android:textColor="#A0A0A0"
             android:textSize="10sp"
             android:textStyle="bold" />

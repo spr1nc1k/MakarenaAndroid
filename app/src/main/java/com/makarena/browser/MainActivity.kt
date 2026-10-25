@@ -462,7 +462,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateStatusPill(animate: Boolean) {
         if (isAIActive) {
-            statusDot.setBackgroundResource(R.drawable.bg_circle_btn)
+            statusDot.setBackgroundColor(android.graphics.Color.WHITE)
             statusText.text = "AI AKTYWNE"
             statusPill.alpha = 1f
         } else {

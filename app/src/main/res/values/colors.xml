@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="oled_black">#04060B</color>
-    <color name="glass_surface">#0D111C</color>
-    <color name="neon_cyan">#26C6FF</color>
-    <color name="neon_purple">#A659FF</color>
-    <color name="neon_green">#2EF299</color>
-    <color name="neon_red">#FF3860</color>
+    <!-- Pure Monochrome Cyber Aesthetics (Czarno - Białe) -->
+    <color name="oled_black">#000000</color>
+    <color name="glass_surface">#0C0C0C</color>
+    <color name="neon_cyan">#FFFFFF</color>
+    <color name="neon_purple">#CCCCCC</color>
+    <color name="neon_green">#FFFFFF</color>
+    <color name="neon_red">#666666</color>
     <color name="text_white">#FFFFFF</color>
-    <color name="text_muted">#8E9BAE</color>
-    <color name="border_glass">#1FFFFFFF</color>
+    <color name="text_muted">#8A8A8A</color>
+    <color name="border_glass">#26FFFFFF</color>
 </resources>
