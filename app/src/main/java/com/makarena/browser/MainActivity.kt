@@ -410,21 +410,21 @@ class MainActivity : AppCompatActivity() {
             when (event.keyCode) {
                 KeyEvent.KEYCODE_VOLUME_DOWN -> {
                     volumeDownTimestamps.add(now)
-                    volumeDownTimestamps.removeAll { now - it > 500 }
+                    volumeDownTimestamps.removeAll { now - it > 800 }
                     if (volumeDownTimestamps.size >= 2) {
                         volumeDownTimestamps.clear()
                         toggleAIAssistant()
-                        return true
                     }
+                    return true
                 }
                 KeyEvent.KEYCODE_VOLUME_UP -> {
                     volumeUpTimestamps.add(now)
-                    volumeUpTimestamps.removeAll { now - it > 500 }
+                    volumeUpTimestamps.removeAll { now - it > 800 }
                     if (volumeUpTimestamps.size >= 2) {
                         volumeUpTimestamps.clear()
                         triggerPanicMode()
-                        return true
                     }
+                    return true
                 }
             }
         }
@@ -528,9 +528,11 @@ class MainActivity : AppCompatActivity() {
 
                     withContext(Dispatchers.Main) {
                         if (!isAIActive) return@withContext
-                        val escaped = answer.replace("\"", "\\\"").replace("\n", " ")
-                        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyOpen', answerText: \"$escaped\" } }));"
-                        webView.evaluateJavascript(js, null)
+                        if (answer.isNotBlank()) {
+                            val escaped = answer.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").replace("\r", "")
+                            val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyOpen', answerText: \"$escaped\" } }));"
+                            webView.evaluateJavascript(js, null)
+                        }
                     }
                 }
             } catch (e: Exception) {

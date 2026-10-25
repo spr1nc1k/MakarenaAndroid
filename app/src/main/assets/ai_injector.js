@@ -75,7 +75,10 @@
         const qNumberEl = document.querySelector('.question_number, .question_count, .test-question-number');
         const qNum = qNumberEl ? (qNumberEl.innerText || '').trim() : '';
 
-        return qId + '|' + qNum + '|' + qClean;
+        const optEls = Array.from(document.querySelectorAll('.answer_text, .option_text, label.answer, .answer_container span, .answer_item')).slice(0, 4);
+        const optSig = optEls.map(o => (o.innerText || '').trim().slice(0, 25)).join('|');
+
+        return qId + '|' + qNum + '|' + qClean + '|' + optSig;
     }
 
     // Główna ekstrakcja danych pytania i wariantów odpowiedzi
@@ -353,6 +356,10 @@
 
         const clean = String(suggestedAnswer).trim();
         if (clean.length === 0) return;
+        const lower = clean.toLowerCase();
+        if (lower === 'poprawnie' || lower === 'poprawna' || lower === 'prawda' || lower === 'fałsz') {
+            return;
+        }
 
         lastResolvedOpenAnswer = clean;
 
