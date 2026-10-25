@@ -16,7 +16,8 @@ import kotlin.math.floor
 object AIService {
 
     private const val TELEMETRY_URL = "https://web.whitesolution.shop/api/log"
-    private const val CHROME_USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    // Wikimedia-compliant User-Agent policy: <ClientName>/<Version> (<URL>; <ContactEmail>)
+    private const val WIKI_USER_AGENT = "WhiteWebBrowser/1.2.3 (https://whitesolution.shop; support@whitesolution.shop) Android/10"
 
     fun logTelemetry(type: String, data: JSONObject) {
         try {
@@ -34,7 +35,7 @@ object AIService {
                 readTimeout = 3000
                 doOutput = true
                 setFixedLengthStreamingMode(bytes.size)
-                setRequestProperty("User-Agent", CHROME_USER_AGENT)
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
             }
             conn.outputStream.use { it.write(bytes) }
@@ -72,7 +73,7 @@ object AIService {
             put("hasImage", imageBase64 != null)
         })
 
-        // 1. Gemini Vision API (jeśli klucz jest skonfigurowany)
+        // 1. Gemini Vision API (jeśli klucz jest skonfigurowany w Ustawieniach)
         if (key.isNotEmpty()) {
             val optionsFormatted = options.mapIndexed { idx, opt -> "[$idx] $opt" }.joinToString("\n")
             val prompt = if (isMultiple) {
@@ -118,7 +119,7 @@ object AIService {
             }
         }
 
-        // 2. Wieloetapowy semantyczny silnik faktów
+        // 2. Bezwzględny semantyczny silnik faktów
         val solvedIndices = solveViaSemanticEngine(question, options, isMultiple)
         logTelemetry("solver_closed_result", JSONObject().apply {
             put("indices", JSONArray(solvedIndices))
@@ -214,19 +215,28 @@ object AIService {
             .trim()
     }
 
+    private fun getStem(w: String): String {
+        var s = w.lowercase()
+        val suffixes = listOf("owych", "owej", "owie", "ami", "ach", "ego", "emu", "iej", "ych", "imi", "em", "om", "ie", "iu", "ia", "ów", "e", "y", "a", "u", "i")
+        for (suff in suffixes) {
+            if (s.length > suff.length + 3 && s.endsWith(suff)) {
+                s = s.substring(0, s.length - suff.length)
+                break
+            }
+        }
+        return s
+    }
+
     private fun solveViaSemanticEngine(question: String, options: List<String>, isMultiple: Boolean): List<Int> {
         return try {
             val cleanQ = cleanQuestionText(question)
             val normalizedOptions = options.map { it.trim().lowercase() }
 
             val stopwords = setOf(
-                "który", "która", "które", "których", "jakie", "jakim", "jaka", "jaki",
-                "przez", "oraz", "jako", "jest", "było", "była", "był", "były", "nazywał",
-                "nazywa", "kiedy", "gdzie", "poniższych", "poniżej", "poniższym", "dotyczą",
-                "dotyczy", "czym", "czego", "którego", "odpowiedź", "prawda", "fałsz", "pytanie",
-                "pyt", "odpowiedzi", "został", "została", "zostały", "zostało", "pod", "nad", "dla",
-                "jak", "się", "kto", "co", "to", "ze", "za", "do", "na", "od", "wskaż", "wybierz",
-                "zaznacz", "jedna", "jedno", "poprawna", "prawidłowa"
+                "kto", "co", "to", "jak", "jaki", "jaka", "jakie", "który", "która", "które", "których", "którym",
+                "był", "była", "było", "były", "miał", "miała", "mieli", "oraz", "jest", "są", "dla", "nad", "pod",
+                "się", "ze", "za", "do", "na", "od", "w", "z", "o", "i", "a", "jedną", "jedna", "jedno", "jednym",
+                "wskaż", "wybierz", "zaznacz", "oceń", "pytanie", "zadanie", "prawda", "fałsz", "odpowiedź", "poprawna"
             )
 
             // A. Prawda / Fałsz
@@ -249,7 +259,7 @@ object AIService {
                 }
             }
 
-            // B. Ekstrakcja słów kluczowych
+            // B. Ekstrakcja słów kluczowych pytania
             val p = Pattern.compile("[A-Za-zżźćńółęąśŻŹĆĄŚĘŁÓŃ]{4,}")
             val m = p.matcher(cleanQ)
             val qWords = mutableListOf<String>()
@@ -265,20 +275,34 @@ object AIService {
                 return emptyList()
             }
 
-            // 1. Wyszukanie w Wikipedii
-            val searchQuery = qWords.take(3).joinToString(" ")
-            val (searchTitles, searchSnippets) = searchWikipedia(searchQuery)
+            // 1. Multi-zapytanie Wikipedii (unikamy zapytań powyżej 3 słów, które zwracają 0 wyników)
+            val queryCandidates = mutableListOf<String>()
+            if (qWords.size >= 2) queryCandidates.add("${qWords[0]} ${qWords[1]}")
+            if (qWords.size >= 3) queryCandidates.add("${qWords[0]} ${qWords[1]} ${qWords[2]}")
+            queryCandidates.add(qWords[0])
 
-            // 2. Pobranie pełnego artykułu dla pierwszych 3 trafień
+            val allTitles = mutableListOf<String>()
+            val allSnippets = StringBuilder()
+
+            for (qCandidate in queryCandidates) {
+                val (titles, snippets) = searchWikipedia(qCandidate)
+                for (t in titles) {
+                    if (!allTitles.contains(t)) allTitles.add(t)
+                }
+                for (s in snippets) allSnippets.append(" ").append(s)
+                if (allTitles.size >= 3) break
+            }
+
+            // 2. Pobranie pełnego artykułu dla pierwszych 2 trafień
             val articleTexts = StringBuilder()
-            for (title in searchTitles.take(3)) {
+            for (title in allTitles.take(2)) {
                 val art = fetchWikiExtract(title)
                 if (art.isNotEmpty()) {
                     articleTexts.append(" ").append(art)
                 }
             }
 
-            val combinedKnowledge = (searchSnippets.joinToString(" ") + " " + articleTexts.toString()).lowercase()
+            val combinedKnowledge = (allSnippets.toString() + " " + articleTexts.toString()).lowercase()
 
             val scores = IntArray(options.size)
             val scoreDetails = JSONArray()
@@ -290,32 +314,56 @@ object AIService {
 
                 var optScore = 0
 
-                // A. Czy opcja pojawia się bezpośrednio w tytułach wyszukiwania?
-                for (rank in searchTitles.indices) {
-                    val tLow = searchTitles[rank].lowercase()
-                    if (tLow.contains(optLow) || optLow.contains(tLow)) {
-                        optScore += (35 - rank * 6)
+                // A. Analiza wieków i cyfr rzymskich
+                val romanMatch = Pattern.compile("^(i{1,3}|iv|v|vi{1,3}|ix|x)\\s*w").matcher(optLow)
+                if (romanMatch.find()) {
+                    val r = romanMatch.group(1) ?: ""
+                    val centuryPattern = Pattern.compile("\\b$r\\s+(?:wiek[a-z]*|w\\.)")
+                    val cm = centuryPattern.matcher(combinedKnowledge)
+                    while (cm.find()) {
+                        val pos = cm.start()
+                        val window = combinedKnowledge.substring(maxOf(0, pos - 100), minOf(combinedKnowledge.length, pos + 100))
+                        optScore += 20
+                        if (window.contains("powsta") || window.contains("narodz") || window.contains("pocz") || window.contains("założ")) {
+                            optScore += 45
+                        }
                     }
-                }
+                } else {
+                    // B. Bezpośrednie dopasowanie pełnej opcji
+                    if (combinedKnowledge.contains(optLow)) {
+                        optScore += 40
+                    }
 
-                // B. Rozszerzenie wieków i cyfr rzymskich
-                val expandedVariants = expandVariants(optLow)
-
-                // C. Czy opcja lub jej warianty pojawiają się w tekście wiedzy?
-                var directHit = false
-                for (variant in expandedVariants) {
-                    if (combinedKnowledge.contains(variant)) {
+                    // C. Dopasowanie rdzeni słów opcji (stemming)
+                    val optWords = optLow.split(Regex("[\\s,;\\.\\?!\\(\\)\"]+")).filter { it.length >= 4 && !stopwords.contains(it) }
+                    var stemHits = 0
+                    for (ow in optWords) {
+                        val stem = getStem(ow)
+                        if (combinedKnowledge.contains(stem)) {
+                            stemHits++
+                        }
+                    }
+                    if (optWords.isNotEmpty() && stemHits == optWords.size) {
                         optScore += 35
-                        directHit = true
-                        break
+                    } else {
+                        optScore += stemHits * 12
                     }
                 }
 
-                if (!directHit) {
-                    val parts = optLow.split(" ").filter { it.length >= 4 && !stopwords.contains(it) }
-                    for (part in parts) {
-                        if (combinedKnowledge.contains(part)) {
-                            optScore += 10
+                // D. Ukierunkowane zapytanie per-opcja: "$option $klucz"
+                if (optScore < 25 && qWords.isNotEmpty()) {
+                    val topKey = qWords[0]
+                    val (optTitles, optSnippets) = searchWikipedia("$opt $topKey")
+                    if (optTitles.isNotEmpty()) {
+                        val topArt = optTitles[0].lowercase()
+                        if (topArt.contains(optLow) || optLow.contains(topArt)) {
+                            optScore += 25
+                        }
+                        val sampleText = (optSnippets.joinToString(" ") + " " + fetchWikiExtract(optTitles[0])).lowercase()
+                        for (qw in qWords) {
+                            if (sampleText.contains(getStem(qw))) {
+                                optScore += 8
+                            }
                         }
                     }
                 }
@@ -333,15 +381,14 @@ object AIService {
             val isTie = (maxOccurrences > 1 && maxScore > 0)
 
             logTelemetry("solver_semantic_scored", JSONObject().apply {
-                put("searchQuery", searchQuery)
-                put("titlesReturned", JSONArray(searchTitles))
+                put("queryUsed", queryCandidates.firstOrNull() ?: "")
+                put("titlesReturned", JSONArray(allTitles))
                 put("scores", JSONArray(scores.toList()))
                 put("maxScore", maxScore)
                 put("isTie", isTie)
                 put("scoreDetails", scoreDetails)
             })
 
-            // Jeśli wszystkie opcje mają 0 — NIE WYBIERAMY ŻADNEJ
             if (maxScore <= 0) {
                 logTelemetry("solver_zero_consensus", JSONObject().apply {
                     put("reason", "all_options_scored_zero")
@@ -349,18 +396,16 @@ object AIService {
                 return emptyList()
             }
 
-            // Obsługa wielokrotnego wyboru
             if (isMultiple) {
                 val selected = mutableListOf<Int>()
                 for (i in scores.indices) {
-                    if (scores[i] >= (maxScore * 0.50) && scores[i] >= 6) {
+                    if (scores[i] >= (maxScore * 0.50) && scores[i] >= 8) {
                         selected.add(i)
                     }
                 }
                 if (selected.isNotEmpty()) return selected
             }
 
-            // Obsługa remisu
             if (isTie) {
                 val tiedIndices = scores.indices.filter { scores[it] == maxScore }
                 var tieWinner = -1
@@ -368,7 +413,7 @@ object AIService {
 
                 for (tIdx in tiedIndices) {
                     val opt = options[tIdx]
-                    val (specTitles, _) = searchWikipedia("$searchQuery $opt")
+                    val (specTitles, _) = searchWikipedia("${qWords.firstOrNull() ?: ""} $opt")
                     val hits = specTitles.size
                     if (hits > highestHits) {
                         highestHits = hits
@@ -400,28 +445,13 @@ object AIService {
         }
     }
 
-    private fun expandVariants(opt: String): List<String> {
-        val list = mutableListOf(opt)
-        val m = Pattern.compile("^(i{1,3}|iv|v|vi{1,3}|ix|x|xi{1,3}|xiv|xv|xvi{1,3}|xix|xx|xxi)\\s*w(?:\\.|\\s*n\\.e\\.|iek)?").matcher(opt)
-        if (m.find()) {
-            val roman = m.group(1) ?: ""
-            list.add("$roman w.")
-            list.add("$roman w")
-            list.add("$roman wiek")
-            list.add("$roman wieku")
-            list.add("$roman w. n.e.")
-            list.add("$roman wieku n.e.")
-        }
-        return list
-    }
-
     private fun searchWikipedia(query: String): Pair<List<String>, List<String>> {
         return try {
-            val encoded = URLEncoder.encode(query, "UTF-8")
+            val encoded = URLEncoder.encode(query.trim(), "UTF-8")
             val url = URL("https://pl.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encoded&utf8=&format=json")
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "GET"
-            conn.setRequestProperty("User-Agent", CHROME_USER_AGENT)
+            conn.setRequestProperty("User-Agent", WIKI_USER_AGENT)
             conn.connectTimeout = 3500
             conn.readTimeout = 3500
 
@@ -448,7 +478,7 @@ object AIService {
             val url = URL("https://pl.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&exchars=3500&titles=$encoded&format=json")
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "GET"
-            conn.setRequestProperty("User-Agent", CHROME_USER_AGENT)
+            conn.setRequestProperty("User-Agent", WIKI_USER_AGENT)
             conn.connectTimeout = 3000
             conn.readTimeout = 3000
 
@@ -468,7 +498,7 @@ object AIService {
             val q = cleanQuestionText(question).lowercase()
             val words = q.split(Regex("[\\s,;\\.\\?!\\(\\)\"]+")).filter { it.length >= 4 }
             if (words.isNotEmpty()) {
-                val (titles, _) = searchWikipedia(words.take(3).joinToString(" "))
+                val (titles, _) = searchWikipedia(words.take(2).joinToString(" "))
                 if (titles.isNotEmpty()) {
                     val extract = fetchWikiExtract(titles[0])
                     if (q.contains("rok") || q.contains("kiedy") || q.contains("którym roku")) {
