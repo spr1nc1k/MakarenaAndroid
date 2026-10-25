@@ -1,6 +1,6 @@
-// ai_injector.js — Makarena AI Engine v1.2.0
+// ai_injector.js — Makarena AI Engine v1.2.1
 // Platform: Testportal (Vue/Angular SPA, DOM-structure-agnostic extractor)
-// Monochromatic Stealth Visuals (Black & White high contrast, guaranteed visible on white & dark pages)
+// Stealth Indicator: ONLY BOLDS THE LETTER (NO frame, NO border, NO dot, NO background)
 // End-to-end Telemetry: full audit trail sent to https://web.whitesolution.shop/api/log
 
 (function() {
@@ -9,7 +9,6 @@
     if (window.__makarena_injector_loaded) return;
     window.__makarena_injector_loaded = true;
 
-    // Default AI active to true if not already set by native host
     if (typeof window.__makarena_ai_active === 'undefined') {
         window.__makarena_ai_active = true;
     }
@@ -42,7 +41,6 @@
     let lastResolvedOpenAnswer = '';
 
     const styledOptionElements = [];
-    const addedBadges = [];
     const originalPlaceholders = new Map();
     const originalValues = new Map();
     const originalTinyMceValues = new Map();
@@ -73,6 +71,13 @@
         if (!el) return '';
         const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
         return t.slice(0, maxLen || 2000);
+    }
+
+    function safeGetClass(el) {
+        if (!el) return '';
+        if (typeof el.className === 'string') return el.className;
+        if (el.getAttribute) return el.getAttribute('class') || '';
+        return '';
     }
 
     // ─── Question extraction: structure-agnostic ───────────────────────────
@@ -178,7 +183,7 @@
                         if (!p) break;
                         const tag = p.tagName.toLowerCase();
                         if (tag === 'label' || tag === 'li' || tag === 'tr' || tag === 'td') return p;
-                        const cls = (p.className || '').toLowerCase();
+                        const cls = safeGetClass(p).toLowerCase();
                         if (cls.includes('answer') || cls.includes('option') || cls.includes('choice')) return p;
                         el = p;
                     }
@@ -305,49 +310,65 @@
         }
     }
 
-    // ─── Highlight (Monochrome High-Contrast Guaranteed Visible) ───────────
+    // ─── Stealth Indicator: ONLY BOLD THE LETTER (No Frame, No Dot) ────────
 
-    function highlightOptionElement(el, idx) {
+    function boldLetterOnly(el, idx) {
         if (!el) return;
         try {
-            // High-contrast monochromatic border: 2px solid black + 3px white outline shadow
-            // Guaranteed visible on pure white, grey, or dark backgrounds!
-            el.style.setProperty('outline', '2px solid #000000', 'important');
-            el.style.setProperty('box-shadow', '0 0 0 3px #ffffff, 0 3px 12px rgba(0, 0, 0, 0.35)', 'important');
-            el.style.setProperty('background', 'rgba(0, 0, 0, 0.06)', 'important');
-            el.style.setProperty('border-radius', '6px', 'important');
-            el.setAttribute('data-makarena-active', '1');
+            // 1. Check if the element already contains an explicit letter / number badge
+            const letterEl = el.querySelector(
+                '.answer_letter, .answer_number, [class*="letter"], [class*="number"], [class*="index"], .option_letter, [class*="badge"]'
+            );
+            if (letterEl && letterEl.innerText && letterEl.innerText.trim().length <= 4) {
+                letterEl.style.setProperty('font-weight', '900', 'important');
+                letterEl.setAttribute('data-makarena-bold', '1');
+                styledOptionElements.push(letterEl);
+                sendLog('letter_bolded', { method: 'explicit_element', index: idx, text: letterEl.innerText.trim() });
+                return;
+            }
 
+            // 2. Find the visible text container
             const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span') || el;
-            if (textEl) {
-                textEl.style.setProperty('font-weight', '900', 'important');
-                textEl.style.setProperty('color', '#000000', 'important');
+            if (!textEl) return;
+
+            // Search for the first text node with text and wrap ONLY the letter/prefix in bold
+            const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT, null, false);
+            let node = walker.nextNode();
+            while (node) {
+                const val = node.nodeValue;
+                if (val && val.trim().length > 0) {
+                    const match = val.match(/^(\s*)([A-Za-z0-9\(\[\.\:\-]\s*)/);
+                    if (match) {
+                        const lead = match[1];
+                        const charPart = match[2];
+                        const tail = val.slice(lead.length + charPart.length);
+
+                        const span = document.createElement('span');
+                        span.setAttribute('data-makarena-letter', '1');
+                        span.style.setProperty('font-weight', '900', 'important');
+                        span.textContent = charPart;
+
+                        const parent = node.parentNode;
+                        if (lead.length > 0) parent.insertBefore(document.createTextNode(lead), node);
+                        parent.insertBefore(span, node);
+                        if (tail.length > 0) parent.insertBefore(document.createTextNode(tail), node);
+                        parent.removeChild(node);
+
+                        styledOptionElements.push(span);
+                        sendLog('letter_bolded', { method: 'wrapped_char', index: idx, char: charPart.trim() });
+                        return;
+                    }
+                }
+                node = walker.nextNode();
             }
 
-            // Visible monochrome dot indicator
-            let badge = el.querySelector('.__makarena_badge');
-            if (!badge) {
-                badge = document.createElement('span');
-                badge.className = '__makarena_badge';
-                badge.innerText = '● ';
-                badge.style.setProperty('color', '#000000', 'important');
-                badge.style.setProperty('font-weight', '900', 'important');
-                badge.style.setProperty('margin-right', '6px', 'important');
-                badge.style.setProperty('font-size', '14px', 'important');
-                el.prepend(badge);
-                addedBadges.push(badge);
-            }
-
-            if (!styledOptionElements.includes(el)) styledOptionElements.push(el);
-
-            sendLog('dom_option_highlighted', {
-                index: idx,
-                text: getDeepText(el, 80),
-                tagName: el.tagName,
-                className: el.className
-            });
+            // 3. Fallback: bold the text element
+            textEl.style.setProperty('font-weight', '900', 'important');
+            textEl.setAttribute('data-makarena-bold', '1');
+            styledOptionElements.push(textEl);
+            sendLog('letter_bolded', { method: 'container_fallback', index: idx });
         } catch (e) {
-            sendLog('dom_highlight_error', { index: idx, error: String(e) });
+            sendLog('bold_letter_error', { index: idx, error: String(e) });
         }
     }
 
@@ -355,25 +376,17 @@
         styledOptionElements.forEach(el => {
             if (!el) return;
             try {
-                el.style.removeProperty('outline');
-                el.style.removeProperty('box-shadow');
-                el.style.removeProperty('background');
-                el.style.removeProperty('border-radius');
-                el.removeAttribute('data-makarena-active');
-
-                const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span') || el;
-                if (textEl) {
-                    textEl.style.removeProperty('font-weight');
-                    textEl.style.removeProperty('color');
+                if (el.hasAttribute && el.hasAttribute('data-makarena-letter')) {
+                    const text = el.textContent || '';
+                    const textNode = document.createTextNode(text);
+                    if (el.parentNode) el.parentNode.replaceChild(textNode, el);
+                } else if (el.style) {
+                    el.style.removeProperty('font-weight');
+                    el.removeAttribute && el.removeAttribute('data-makarena-bold');
                 }
             } catch (_) {}
         });
         styledOptionElements.length = 0;
-
-        addedBadges.forEach(b => {
-            try { b.remove(); } catch (_) {}
-        });
-        addedBadges.length = 0;
 
         const inputs = document.querySelectorAll(
             '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
@@ -425,14 +438,14 @@
             targets = cachedOptionElements;
         }
 
-        sendLog('applyClosed_executing', {
+        sendLog('applyClosed_executing_bold_letter', {
             targetIndices: indices,
             availableContainersCount: targets.length
         });
 
         indices.forEach(idx => {
             if (targets && targets[idx]) {
-                highlightOptionElement(targets[idx], idx);
+                boldLetterOnly(targets[idx], idx);
             } else {
                 sendLog('applyClosed_target_out_of_bounds', {
                     requestedIndex: idx,
@@ -551,13 +564,13 @@
             let needsReapply = false;
             for (const idx of lastResolvedIndices) {
                 const el = cachedOptionElements[idx];
-                if (el && !el.hasAttribute('data-makarena-active')) {
+                if (el && !el.querySelector('[data-makarena-letter]') && !el.hasAttribute('data-makarena-bold')) {
                     needsReapply = true;
                     break;
                 }
             }
             if (needsReapply) {
-                sendLog('guardian_reapplying_closed', { indices: lastResolvedIndices });
+                sendLog('guardian_reapplying_bold', { indices: lastResolvedIndices });
                 applyClosedHint(lastResolvedIndices);
             }
         }
