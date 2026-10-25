@@ -1,8 +1,8 @@
 // ai_injector.js
 // Niewykrywalny silnik analizy DOM i podpowiedzi AI dla platformy Testportal
 // Tryb przełącznika (Persistent Toggle Mode):
-// 2x głośność w dół = WŁĄCZENIE (pozostaje aktywne na wszystkich kolejnych pytaniach)
-// 2x głośność w górę = WYŁĄCZENIE (Panic Mode, ukrycie i zatrzymanie asysty)
+// 2x głośność w dół = WŁĄCZ / WYŁĄCZ (stan utrzymywany na wszystkich kolejnych pytaniach)
+// 2x głośność w górę = PANIC MODE (natychmiastowe ukrycie i wyczyszczenie wszystkiego)
 
 (function() {
     'use strict';
@@ -20,6 +20,8 @@
     let lastResolvedOpenAnswer = '';
 
     const originalPlaceholders = new Map();
+    const originalValues = new Map();
+    const originalTinyMceValues = new Map();
     const styledOptionElements = [];
 
     function escapeHTML(str) {
@@ -126,11 +128,9 @@
 
             containers.forEach((el) => {
                 if (!el) return;
-                // Poszukiwanie specyficznego elementu tekstowego odpowiedzi
                 const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span') || el;
                 let text = textEl.innerText ? textEl.innerText.trim() : textEl.textContent ? textEl.textContent.trim() : '';
 
-                // Czyszczenie zbędnych prefiksów w rodzaju "A.", "1."
                 const cleanedText = text.replace(/^[A-Za-z0-9][\.\:\)\-]\s*/, '').trim();
                 const displayText = cleanedText.length > 0 ? cleanedText : text;
 
@@ -149,7 +149,7 @@
                 }
             });
 
-            // Awaryjna detekcja dla pytań Prawda / Fałsz
+            // Prawda / Fałsz awaryjnie
             if (options.length === 0 && !openInput) {
                 const tfKeywords = ['prawda', 'fałsz', 'true', 'false'];
                 const allElements = Array.from(answersScope.querySelectorAll('label, div, button, span, td'));
@@ -177,7 +177,7 @@
 
             cachedOptionElements = resolvedContainers;
 
-            // Precyzyjne rozróżnienie pytań:
+            // Rozróżnienie pytań:
             // Kwadrat / Checkbox -> Wielokrotny wybór ('multiple')
             // Kółko / Radio -> Jednokrotny wybór ('closed')
             // Edytor / Pole tekstowe -> Otwarte ('open')
@@ -208,8 +208,7 @@
         }
     }
 
-    // Bezpieczne, niedestrukcyjne stylowanie poprawnej opcji odpowiedzi
-    // Nie niszczy węzłów DOM, dzięki czemu silnik React / Angular / MDC nie cofa zmian
+    // Bezpieczne, niedestrukcyjne wyróżnienie poprawnej opcji
     function highlightOptionElement(el) {
         if (!el) return;
 
@@ -220,14 +219,12 @@
             el.style.setProperty('border-radius', '4px', 'important');
             el.setAttribute('data-makarena-active', '1');
 
-            // Pogrubienie tekstu wewnątrz elementu opcji
             const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span');
             if (textEl && textEl !== el) {
                 textEl.style.setProperty('font-weight', '800', 'important');
                 textEl.style.setProperty('color', '#00701a', 'important');
             }
 
-            // Obsługa pytań czysto graficznych
             const optImg = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
             if (optImg) {
                 optImg.style.setProperty('outline', '3px solid #00c853', 'important');
@@ -241,7 +238,7 @@
         } catch(e) {}
     }
 
-    // Cofnięcie wszystkich wyróżnień
+    // Cofnięcie wszystkich modyfikacji (zamknięte i otwarte)
     function revertModifications() {
         styledOptionElements.forEach(el => {
             if (!el) return;
@@ -268,27 +265,51 @@
         });
         styledOptionElements.length = 0;
 
-        // Usunięcie bannerów podpowiedzi dla pytań otwartych
-        document.querySelectorAll('.makarena-open-hint-card').forEach(banner => {
-            try { banner.remove(); } catch(e) {}
-        });
-
-        // Przywrócenie placeholderów
-        originalPlaceholders.forEach((origVal, input) => {
+        // Przywrócenie pierwotnych wartości w polach otwartych (czyszczenie asysty)
+        const inputs = document.querySelectorAll(
+            '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
+        );
+        inputs.forEach(input => {
             try {
-                if (origVal) {
-                    input.setAttribute('placeholder', origVal);
+                if (input._lastInsertedAnswer && input.value === input._lastInsertedAnswer) {
+                    const origVal = originalValues.get(input) || '';
+                    input.value = origVal;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                input._lastInsertedAnswer = null;
+
+                if (originalPlaceholders.has(input)) {
+                    input.setAttribute('placeholder', originalPlaceholders.get(input));
+                    input.placeholder = originalPlaceholders.get(input);
                 } else {
                     input.removeAttribute('placeholder');
                 }
             } catch(e) {}
         });
+        originalValues.clear();
         originalPlaceholders.clear();
+
+        // Przywrócenie TinyMCE
+        const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
+        if (iframe) {
+            try {
+                const ifrDoc = iframe.contentDocument || iframe.contentWindow.document;
+                if (ifrDoc && ifrDoc.body) {
+                    if (iframe._lastInsertedAnswer && ifrDoc.body.innerText.trim() === iframe._lastInsertedAnswer) {
+                        ifrDoc.body.innerHTML = originalTinyMceValues.get(iframe) || '';
+                    }
+                    iframe._lastInsertedAnswer = null;
+                }
+            } catch(e) {}
+        }
+        originalTinyMceValues.clear();
     }
 
     // Aplikowanie podpowiedzi dla pytań jedno- i wielokrotnego wyboru
     function applyClosedHint(indicesArg) {
         if (isPanicMode) return;
+        if (!window.__makarena_ai_active) return;
 
         revertModifications();
 
@@ -324,73 +345,18 @@
         });
     }
 
-    // Aplikowanie podpowiedzi dla pytań otwartych (Short & Long / TinyMCE)
+    // Aplikowanie podpowiedzi dla pytań otwartych — BEZ ŻADNYCH DUSZKÓW I BEZ KLIKANIA:
+    // Odpowiedź trafia bezpośrednio w pole tekstowe / edytor natychmiast po włączeniu asysty
     function applyOpenHint(suggestedAnswer) {
         if (isPanicMode || !suggestedAnswer) return;
+        if (!window.__makarena_ai_active) return;
 
         const clean = String(suggestedAnswer).trim();
         if (clean.length === 0) return;
 
         lastResolvedOpenAnswer = clean;
 
-        // Usunięcie starych bannerów podpowiedzi
-        document.querySelectorAll('.makarena-open-hint-card').forEach(b => {
-            try { b.remove(); } catch(e) {}
-        });
-
-        // 1. Znalezienie kontenera na banner podpowiedzi
-        const container = document.querySelector(
-            '.rich-text-answer-container, .all_short_answers, #questionForm .question_answers, .test-question-content, #questionForm'
-        ) || document.body;
-
-        if (container) {
-            const card = document.createElement('div');
-            card.className = 'makarena-open-hint-card';
-            card.style.cssText = 
-                'margin: 10px 0 14px 0;' +
-                'padding: 10px 14px;' +
-                'background: #f0f7ff;' +
-                'border: 1px solid #cce3ff;' +
-                'border-left: 4px solid #00c853;' +
-                'border-radius: 6px;' +
-                'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
-                'font-size: 14px;' +
-                'line-height: 1.45;' +
-                'color: #1a1a1a;' +
-                'display: block;' +
-                'box-shadow: 0 2px 5px rgba(0,0,0,0.06);' +
-                'user-select: text;';
-
-            card.innerHTML = 
-                '<div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; color: #008736; margin-bottom: 3px;">' +
-                    'Sugerowana odpowiedź:' +
-                '</div>' +
-                '<div style="font-weight: 600; font-size: 15px; color: #111111;">' +
-                    escapeHTML(clean) +
-                '</div>';
-
-            // Umieszczenie karty przed edytorem / polem odpowiedzi
-            if (container.firstChild) {
-                container.insertBefore(card, container.firstChild);
-            } else {
-                container.appendChild(card);
-            }
-        }
-
-        // 2. Obsługa edytora TinyMCE iframe (#givenAnswer_ifr)
-        const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
-        if (iframe) {
-            try {
-                const ifrDoc = iframe.contentDocument || iframe.contentWindow.document;
-                if (ifrDoc && ifrDoc.body) {
-                    if (!ifrDoc.body.innerText.trim()) {
-                        ifrDoc.body.setAttribute('data-placeholder', clean);
-                    }
-                }
-            } catch(e) {}
-        }
-
-        // 3. Obsługa standardowych pól input / textarea
+        // 1. Obsługa pól standardowych (input, textarea, div editable)
         const inputs = document.querySelectorAll(
             '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
         );
@@ -399,10 +365,40 @@
                 if (!originalPlaceholders.has(input)) {
                     originalPlaceholders.set(input, input.getAttribute('placeholder') || '');
                 }
-                input.setAttribute('placeholder', clean);
+                if (!originalValues.has(input)) {
+                    originalValues.set(input, input.value || '');
+                }
+
                 input.placeholder = clean;
+                input.setAttribute('placeholder', clean);
+
+                // Bezpośrednie wpisanie gotowej odpowiedzi w pole (jeśli puste lub poprzednia sugestia)
+                if (!input.value || input.value === input._lastInsertedAnswer) {
+                    input.value = clean;
+                    input._lastInsertedAnswer = clean;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                }
             } catch(e) {}
         });
+
+        // 2. Obsługa edytora TinyMCE iframe (#givenAnswer_ifr)
+        const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
+        if (iframe) {
+            try {
+                const ifrDoc = iframe.contentDocument || iframe.contentWindow.document;
+                if (ifrDoc && ifrDoc.body) {
+                    if (!originalTinyMceValues.has(iframe)) {
+                        originalTinyMceValues.set(iframe, ifrDoc.body.innerHTML || '');
+                    }
+                    const curText = ifrDoc.body.innerText.trim();
+                    if (!curText || curText === iframe._lastInsertedAnswer) {
+                        ifrDoc.body.innerHTML = '<p>' + escapeHTML(clean) + '</p>';
+                        iframe._lastInsertedAnswer = clean;
+                    }
+                }
+            } catch(e) {}
+        }
     }
 
     // Panic Mode — całkowite, natychmiastowe ukrycie wszystkich oznaczeń
@@ -449,11 +445,11 @@
         }
     }
 
-    // Strażnik stylów (Style Guardian) — zapobiega znikaniu podświetlenia przy ponownym renderowaniu DOM przez Testportal
+    // Strażnik stylów (Style Guardian) — zapobiega znikaniu podświetlenia przy cyklicznym re-renderowaniu DOM przez Testportal
     function guardianTick() {
         if (isPanicMode || !window.__makarena_ai_active) return;
 
-        // Jeśli mamy poprawne indeksy dla pytania zamkniętego, upewnij się, że styl wciąż jest aktywny
+        // Sprawdzenie pytań zamkniętych
         if (lastResolvedIndices && lastResolvedIndices.length > 0) {
             let needsReapply = false;
             lastResolvedIndices.forEach(idx => {
@@ -468,10 +464,16 @@
             }
         }
 
-        // Jeśli to pytanie otwarte, upewnij się, że banner wciąż istnieje
+        // Sprawdzenie pytań otwartych
         if (lastResolvedOpenAnswer) {
-            const hasBanner = document.querySelector('.makarena-open-hint-card') !== null;
-            if (!hasBanner) {
+            const inputs = document.querySelectorAll('.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"])');
+            let needsReapplyOpen = false;
+            inputs.forEach(input => {
+                if (!input.value && !input.getAttribute('placeholder')) {
+                    needsReapplyOpen = true;
+                }
+            });
+            if (needsReapplyOpen) {
                 applyOpenHint(lastResolvedOpenAnswer);
             }
         }
@@ -497,14 +499,14 @@
     }
     startObserving();
 
-    // Ciągły strażnik z interwałem 350ms (niezależny od mutacji DOM)
+    // Ciągły strażnik z interwałem 350ms
     setInterval(function() {
         if (isPanicMode || !window.__makarena_ai_active) return;
         checkAndAutoAnalyzeNewQuestion();
         guardianTick();
     }, 350);
 
-    // Nasłuch zdarzeń sterowania z natywnego kodu Kotlin
+    // Nasłuch zdarzeń sterowania z natywnego kodu Kotlin (2x głośność w dół = toggle, 2x w górę = panic)
     document.addEventListener('__makarena_action', function(e) {
         if (!e || !e.detail) return;
         const action = e.detail.action;
@@ -516,11 +518,11 @@
         } else if (action === 'disable' || action === 'panic') {
             enablePanicMode();
         } else if (action === 'applyClosed') {
-            if (isPanicMode) return;
+            if (isPanicMode || !window.__makarena_ai_active) return;
             const indices = e.detail.correctIndices !== undefined ? e.detail.correctIndices : [e.detail.correctIndex];
             applyClosedHint(indices);
         } else if (action === 'applyOpen') {
-            if (isPanicMode) return;
+            if (isPanicMode || !window.__makarena_ai_active) return;
             applyOpenHint(e.detail.answerText);
         }
     });

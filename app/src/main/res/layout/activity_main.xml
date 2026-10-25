@@ -68,7 +68,7 @@
         android:background="@android:color/transparent"
         app:layout_constraintBottom_toTopOf="@+id/floating_dock" />
 
-    <!-- Floating 2026 Cyber Dock -->
+    <!-- Floating 2026 Cyber Dock (Identical to iOS version) -->
     <LinearLayout
         android:id="@+id/floating_dock"
         android:layout_width="match_parent"
@@ -85,31 +85,41 @@
 
         <ImageButton
             android:id="@+id/btn_back"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
             android:background="@drawable/bg_circle_btn"
             android:contentDescription="Wstecz"
-            android:src="@android:drawable/ic_media_previous"
+            android:src="@drawable/ic_chevron_left"
             app:tint="@color/text_white" />
 
         <ImageButton
             android:id="@+id/btn_forward"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
             android:layout_marginStart="6dp"
             android:background="@drawable/bg_circle_btn"
             android:contentDescription="Dalej"
-            android:src="@android:drawable/ic_media_next"
+            android:src="@drawable/ic_chevron_right"
             app:tint="@color/text_white" />
 
-        <!-- URL Capsule -->
-        <FrameLayout
+        <!-- URL Capsule with Shield Icon -->
+        <LinearLayout
             android:layout_width="0dp"
             android:layout_height="36dp"
             android:layout_marginStart="8dp"
             android:layout_marginEnd="8dp"
             android:layout_weight="1"
-            android:background="@drawable/bg_capsule">
+            android:background="@drawable/bg_capsule"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp">
+
+            <ImageView
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_marginEnd="6dp"
+                android:src="@drawable/ic_lock_shield" />
 
             <EditText
                 android:id="@+id/edit_url"
@@ -121,21 +131,42 @@
                 android:imeOptions="actionGo"
                 android:inputType="textUri"
                 android:maxLines="1"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp"
                 android:textColor="@color/text_white"
                 android:textColorHint="@color/text_muted"
                 android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- Tabs Pill Button (Shows "1" like iOS) -->
+        <FrameLayout
+            android:id="@+id/btn_tabs"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_tab_pill"
+            android:clickable="true"
+            android:focusable="true">
+
+            <TextView
+                android:id="@+id/text_tabs_count"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:fontFamily="monospace"
+                android:text="1"
+                android:textColor="@color/text_white"
+                android:textSize="11sp"
+                android:textStyle="bold" />
         </FrameLayout>
 
+        <!-- Ellipsis More Button (...) matching iOS dockButton(icon: "ellipsis") -->
         <ImageButton
             android:id="@+id/btn_settings"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
             android:background="@drawable/bg_circle_btn"
             android:contentDescription="Ustawienia"
-            android:src="@android:drawable/ic_menu_preferences"
-            app:tint="@color/neon_cyan" />
+            android:src="@drawable/ic_ellipsis"
+            app:tint="@color/text_white" />
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
