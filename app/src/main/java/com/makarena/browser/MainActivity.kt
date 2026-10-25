@@ -515,9 +515,11 @@ class MainActivity : AppCompatActivity() {
 
                     withContext(Dispatchers.Main) {
                         if (!isAIActive) return@withContext
-                        val indicesStr = correctIndices.joinToString(",", "[", "]")
-                        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyClosed', correctIndices: $indicesStr } }));"
-                        webView.evaluateJavascript(js, null)
+                        if (correctIndices.isNotEmpty()) {
+                            val indicesStr = correctIndices.joinToString(",", "[", "]")
+                            val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyClosed', correctIndices: $indicesStr } }));"
+                            webView.evaluateJavascript(js, null)
+                        }
                     }
                 } else if (type == "open") {
                     val answer = AIService.solveOpenQuestion(applicationContext, question, imageBase64)
