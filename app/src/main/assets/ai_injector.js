@@ -1,17 +1,15 @@
-// ai_injector.js
-// Niewykrywalny silnik analizy DOM i podpowiedzi AI dla platformy Testportal
-// Tryb przełącznika (Persistent Toggle Mode):
-// 2x głośność w dół = WŁĄCZ / WYŁĄCZ (stan utrzymywany na wszystkich kolejnych pytaniach)
-// 2x głośność w górę = PANIC MODE (natychmiastowe ukrycie i wyczyszczenie wszystkiego)
+// ai_injector.js — Makarena AI Engine v1.2.0
+// Platform: Testportal (Vue/Angular SPA, DOM-structure-agnostic extractor)
+// Toggle: 2× VOL_DOWN = ON/OFF persistent | 2× VOL_UP = PANIC (clear all)
+// Bridge: window.prompt('__makarena_bridge:...') → onJsPrompt → AIService → CustomEvent '__makarena_action'
 
 (function() {
     'use strict';
 
-    if (window.__makarena_injector_loaded) {
-        return;
-    }
+    if (window.__makarena_injector_loaded) return;
     window.__makarena_injector_loaded = true;
 
+    // ─── State ────────────────────────────────────────────────────────────────
     let isPanicMode = false;
     let isProcessing = false;
     let currentQuestionSignature = '';
@@ -19,10 +17,12 @@
     let lastResolvedIndices = [];
     let lastResolvedOpenAnswer = '';
 
+    const styledOptionElements = [];
     const originalPlaceholders = new Map();
     const originalValues = new Map();
     const originalTinyMceValues = new Map();
-    const styledOptionElements = [];
+
+    // ─── DOM helpers ─────────────────────────────────────────────────────────
 
     function escapeHTML(str) {
         if (!str) return '';
@@ -33,172 +33,269 @@
             .replace(/"/g, '&quot;');
     }
 
-    // Usunięcie dynamicznych liczników czasu, aby nie fałszować sygnatury pytania
     function sanitizeQuestionText(raw) {
         if (!raw) return '';
         return raw
             .replace(/Pozostały\s+czas[:\s]+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?/gi, '')
             .replace(/Czas\s+na\s+odpowiedź[:\s]+[0-9]{1,2}:[0-9]{2}/gi, '')
             .replace(/\b[0-9]{1,2}:[0-9]{2}\b/g, '')
+            .replace(/^\s*(?:Pytanie|Pyt\.?|Zadanie|Zad\.?)\s*\.?\:?\s*[0-9]+\s*\.?\:?\s*/i, '')
             .replace(/\s+/g, ' ')
             .trim();
     }
 
-    // Ekstrakcja URL obrazu pytania
-    function extractQuestionImageUrl() {
-        const img = document.querySelector(
-            '.question_essence img, .question_content img, [class*="question"] img, #questionForm img, .question_image img, .test-question-content img'
-        );
+    // Deep text extraction: skip elements that are purely answer option containers
+    function getDeepText(el, maxLen) {
+        if (!el) return '';
+        const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        return t.slice(0, maxLen || 2000);
+    }
 
-        if (!img) return null;
+    // ─── Question extraction: structure-agnostic ───────────────────────────
 
-        const src = img.src || '';
-        if (src.includes('logo') || src.includes('avatar') || src.includes('icon_') || src.includes('data:image/svg')) {
-            return null;
+    // Returns {questionEl, questionText} by broad multi-strategy search
+    function findQuestionElement() {
+        // Strategy 1: well-known class selectors (Testportal 4.x / 5.x)
+        const KNOWN_Q_SELECTORS = [
+            '.question_essence',
+            '.question_text_content',
+            '.question_text',
+            '.question-text',
+            '.question_content',
+            '[class*="question_text"]',
+            '[class*="question-text"]',
+            '[class*="questionText"]',
+            '[class*="question_essence"]',
+            '.test-question-content',
+            '[class*="questionContent"]',
+            '[data-testid*="question"]',
+        ];
+        for (const sel of KNOWN_Q_SELECTORS) {
+            const el = document.querySelector(sel);
+            if (el) {
+                const t = sanitizeQuestionText(getDeepText(el, 1500));
+                if (t.length > 5) return { el, text: t };
+            }
         }
 
-        return src;
+        // Strategy 2: any element that immediately precedes a form/fieldset with radios or checkboxes
+        const forms = Array.from(document.querySelectorAll('form, fieldset, [class*="answer"], [class*="Answer"]'));
+        for (const form of forms) {
+            const hasInputs = form.querySelector('input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]');
+            if (hasInputs) {
+                // walk backwards in DOM siblings / parent siblings
+                let prev = form.previousElementSibling;
+                while (prev) {
+                    const t = sanitizeQuestionText(getDeepText(prev, 1500));
+                    if (t.length > 10 && !prev.querySelector('input')) return { el: prev, text: t };
+                    prev = prev.previousElementSibling;
+                }
+                // try parent's previous sibling
+                if (form.parentElement) {
+                    let pp = form.parentElement.previousElementSibling;
+                    while (pp) {
+                        const t = sanitizeQuestionText(getDeepText(pp, 1500));
+                        if (t.length > 10) return { el: pp, text: t };
+                        pp = pp.previousElementSibling;
+                    }
+                }
+            }
+        }
+
+        // Strategy 3: largest text block that is NOT inside a form with inputs
+        // Walk all <p>, <div>, <span>, <h2>, <h3> and pick longest meaningful text
+        const candidates = Array.from(document.querySelectorAll('p, h2, h3, [class*="content"], [class*="Content"]'));
+        let best = null, bestLen = 0;
+        for (const el of candidates) {
+            if (el.querySelector('input, select, textarea, button')) continue;
+            const t = sanitizeQuestionText(getDeepText(el, 1500));
+            if (t.length > 15 && t.length > bestLen) {
+                best = { el, text: t };
+                bestLen = t.length;
+            }
+        }
+        if (best) return best;
+
+        return null;
     }
 
-    // Obliczenie stabilnej sygnatury pytania
+    // Finds all answer option containers with their text and DOM element
+    // Returns Array<{el, text}>
+    function findOptionContainers() {
+        // Priority: explicit answer class selectors
+        const ANSWER_CLASSES = [
+            '.question_answers .question_answer',
+            '.question_answer',
+            '[class*="question_answer"]',
+            '[class*="answerOption"]',
+            '[class*="answer_option"]',
+            '[class*="answer-option"]',
+            '[class*="answer_item"]',
+            '[class*="answerItem"]',
+            '.answer_container',
+            '[class*="answer_container"]',
+            '[class*="answerContainer"]',
+            '.answer_item',
+            'label.answer',
+            '.question_option_wrapper',
+            '[class*="question_option"]',
+            '.true-false-option',
+            '.tf_option',
+        ];
+
+        for (const sel of ANSWER_CLASSES) {
+            const els = Array.from(document.querySelectorAll(sel));
+            if (els.length >= 2) {
+                const results = extractTextFromContainers(els);
+                if (results.length >= 2) return results;
+            }
+        }
+
+        // Fallback: find all radio / checkbox inputs and walk up to their label/container
+        const CONTROL_SELS = [
+            'input[type="radio"]', 'input[type="checkbox"]',
+            '[role="radio"]', '[role="checkbox"]',
+            '.mdc-radio', '.mdc-checkbox',
+            '[class*="radio"]', '[class*="checkbox"]',
+        ];
+
+        for (const sel of CONTROL_SELS) {
+            const inputs = Array.from(document.querySelectorAll(sel));
+            if (inputs.length >= 2) {
+                const containers = inputs.map(inp => {
+                    // Walk up to find a meaningful container (label > li > tr > div)
+                    let el = inp;
+                    for (let i = 0; i < 6; i++) {
+                        const p = el.parentElement;
+                        if (!p) break;
+                        const tag = p.tagName.toLowerCase();
+                        if (tag === 'label' || tag === 'li' || tag === 'tr' || tag === 'td') return p;
+                        const cls = (p.className || '').toLowerCase();
+                        if (cls.includes('answer') || cls.includes('option') || cls.includes('choice')) return p;
+                        el = p;
+                    }
+                    return inp.parentElement || inp;
+                });
+                const results = extractTextFromContainers(containers);
+                if (results.length >= 2) return results;
+            }
+        }
+
+        // Fallback: <label> elements containing text that are siblings of each other
+        const labels = Array.from(document.querySelectorAll('label'));
+        if (labels.length >= 2) {
+            const results = extractTextFromContainers(labels);
+            if (results.length >= 2) return results;
+        }
+
+        return [];
+    }
+
+    function extractTextFromContainers(els) {
+        const seen = new Set();
+        const results = [];
+        for (const el of els) {
+            if (!el) continue;
+            // Get text from child span/div/label or the element itself
+            const textEl = el.querySelector('.answer_text, .option_text, .mdc-form-field, span, div') || el;
+            let text = (textEl.innerText || textEl.textContent || '').replace(/\s+/g, ' ').trim();
+            // Remove leading letter prefix like "A. " "1) " "a) "
+            text = text.replace(/^[A-Za-z0-9][\.\:\)\-]\s*/, '').trim();
+            if (!text || text.length > 400) continue;
+            if (seen.has(text)) continue;
+            seen.add(text);
+            results.push({ el, text });
+        }
+        return results;
+    }
+
+    // ─── Signature ────────────────────────────────────────────────────────────
+
     function computeQuestionSignature() {
-        const qEl = document.querySelector(
-            '.question_essence, .question_text_content, .question_content, .question-text, .question_text, ' +
-            '.test-question-content, [class*="question_text"], [class*="question-text"], .question'
-        );
-        const qRaw = qEl ? (qEl.innerText || qEl.textContent || '') : '';
-        const qClean = sanitizeQuestionText(qRaw).slice(0, 300);
+        // Use any available unique identifier first
+        const qId = document.querySelector('input[name="questionId"], input[name="id"], [data-question-id]');
+        const idVal = qId ? (qId.value || qId.getAttribute('data-question-id') || '') : '';
 
-        const qIdInput = document.querySelector('input[name="questionId"], input[name="id"], [data-question-id]');
-        const qId = qIdInput ? (qIdInput.value || qIdInput.getAttribute('data-question-id') || '') : '';
+        const qNum = document.querySelector('.question_number, .question_count, [class*="questionNumber"], [class*="question_count"]');
+        const numVal = qNum ? (qNum.innerText || '').trim() : '';
 
-        const qNumberEl = document.querySelector('.question_number, .question_count, .test-question-number');
-        const qNum = qNumberEl ? (qNumberEl.innerText || '').trim() : '';
+        const qInfo = findQuestionElement();
+        const qText = qInfo ? qInfo.text.slice(0, 200) : '';
 
-        const optEls = Array.from(document.querySelectorAll('.answer_text, .option_text, label.answer, .answer_container span, .answer_item')).slice(0, 4);
-        const optSig = optEls.map(o => (o.innerText || '').trim().slice(0, 25)).join('|');
-
-        return qId + '|' + qNum + '|' + qClean + '|' + optSig;
+        const sig = idVal + '||' + numVal + '||' + qText;
+        return sig.trim();
     }
 
-    // Główna ekstrakcja danych pytania i wariantów odpowiedzi
+    // ─── Main extraction ───────────────────────────────────────────────────
+
     function extractQuestionData() {
         try {
-            const questionTextEl = document.querySelector(
-                '.question_essence, .question_text_content, .question_content, .question-text, .question_text, ' +
-                '.test-question-content, [class*="question_text"], [class*="question-text"], .question, h1, h2, h3'
-            ) || document.body;
+            const qInfo = findQuestionElement();
+            const questionText = qInfo ? qInfo.text : '';
 
-            const rawText = questionTextEl ? (questionTextEl.innerText || questionTextEl.textContent || '') : '';
-            const questionText = sanitizeQuestionText(rawText).slice(0, 1500);
+            // Image associated with question
+            const imgEl = document.querySelector(
+                '.question_essence img, .question_content img, [class*="question"] img, #questionForm img, .question_image img'
+            );
+            const imgUrl = (imgEl && imgEl.src && !imgEl.src.includes('logo') && !imgEl.src.includes('icon_')) ? imgEl.src : null;
 
-            const imgUrl = extractQuestionImageUrl();
-
-            // Kontener pytań na Testportal
-            const answersScope = document.querySelector(
-                '.question_answers, #questionForm, .question_content, .test-question-content, .test_content'
-            ) || document.body;
-
-            // Detekcja elementów wyboru w obrębie kontenera
-            const checkboxes = Array.from(answersScope.querySelectorAll(
-                '.mdc-checkbox, input[type="checkbox"], [role="checkbox"], [class*="checkbox"]'
-            ));
-            const radioInputs = Array.from(answersScope.querySelectorAll(
-                '.mdc-radio, input[type="radio"], [role="radio"], [class*="radio"]'
-            ));
-
-            // Pytanie otwarte (krótka odpowiedź lub pole edytora TinyMCE)
+            // Open answer input detection (before closed to avoid false positive)
             const openInput = document.querySelector(
                 '#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"], ' +
-                '.rich-text-answer-container, .all_short_answers input, .mdc-text-field__input, ' +
-                'textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
+                '.rich-text-answer-container, .all_short_answers input, ' +
+                'textarea, div[contenteditable="true"]'
+            );
+            // Short text input — only treat as open if no radio/checkbox siblings nearby
+            const shortInput = document.querySelector(
+                '.mdc-text-field__input, input[type="text"]:not([name*="search"]):not([name*="url"]):not([name*="q"])'
             );
 
-            // Wyznaczanie kontenerów poszczególnych opcji odpowiedzi
-            let containers = [];
-            if (checkboxes.length > 0) {
-                containers = checkboxes.map(i => i.closest('.question_answer, .answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
-            } else if (radioInputs.length > 0) {
-                containers = radioInputs.map(i => i.closest('.question_answer, .answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
-            } else if (!openInput) {
-                containers = Array.from(document.querySelectorAll(
-                    '.question_answers .question_answer, .answer_container, .question_answers .answer, #questionForm .question_option_wrapper, label.answer, .true-false-option, .tf_option'
-                ));
-            }
+            const optionData = findOptionContainers();
+            cachedOptionElements = optionData.map(o => o.el);
+            const options = optionData.map((o, i) => ({ id: i, text: o.text }));
 
-            let options = [];
-            const resolvedContainers = [];
-
-            containers.forEach((el) => {
-                if (!el) return;
-                const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span') || el;
-                let text = textEl.innerText ? textEl.innerText.trim() : textEl.textContent ? textEl.textContent.trim() : '';
-
-                const cleanedText = text.replace(/^[A-Za-z0-9][\.\:\)\-]\s*/, '').trim();
-                const displayText = cleanedText.length > 0 ? cleanedText : text;
-
-                const img = el.querySelector('img');
-                const optImgUrl = img ? img.src : null;
-
-                if (displayText && displayText.length < 400) {
-                    if (!options.some(o => o.text === displayText)) {
-                        options.push({ id: options.length, text: displayText, imageUrl: optImgUrl });
-                        resolvedContainers.push(el);
-                    }
-                } else if (img) {
-                    const label = 'Opcja ' + (options.length + 1);
-                    options.push({ id: options.length, text: label, imageUrl: optImgUrl, isImageOnly: true });
-                    resolvedContainers.push(el);
-                }
-            });
-
-            // Prawda / Fałsz awaryjnie
-            if (options.length === 0 && !openInput) {
-                const tfKeywords = ['prawda', 'fałsz', 'true', 'false'];
-                const allElements = Array.from(answersScope.querySelectorAll('label, div, button, span, td'));
-                const tfFound = [];
-
-                allElements.forEach(el => {
-                    const t = (el.innerText || '').trim();
-                    if (t.length > 0 && t.length < 30) {
-                        const lower = t.toLowerCase();
-                        if (tfKeywords.some(kw => lower === kw)) {
-                            if (!tfFound.some(o => o.text === t || o.el.contains(el))) {
-                                tfFound.push({ text: t, el: el });
-                            }
-                        }
-                    }
-                });
-
-                if (tfFound.length >= 2) {
-                    tfFound.forEach(item => {
-                        options.push({ id: options.length, text: item.text });
-                        resolvedContainers.push(item.el);
-                    });
-                }
-            }
-
-            cachedOptionElements = resolvedContainers;
-
-            // Rozróżnienie pytań:
-            // Kwadrat / Checkbox -> Wielokrotny wybór ('multiple')
-            // Kółko / Radio -> Jednokrotny wybór ('closed')
-            // Edytor / Pole tekstowe -> Otwarte ('open')
+            // Determine question type
             let type = 'unknown';
+            const hasCheckbox = !!document.querySelector(
+                'input[type="checkbox"], [role="checkbox"], .mdc-checkbox, [class*="checkbox"]'
+            );
+            const hasRadio = !!document.querySelector(
+                'input[type="radio"], [role="radio"], .mdc-radio, [class*="radio__"]'
+            );
 
-            const hasCheckboxes = checkboxes.length > 0 || answersScope.querySelector('.mdc-checkbox, input[type="checkbox"], [role="checkbox"]') !== null;
-            const hasRadios = radioInputs.length > 0 || answersScope.querySelector('.mdc-radio, input[type="radio"], [role="radio"]') !== null;
-
-            if (hasCheckboxes) {
-                type = 'multiple';
-            } else if (hasRadios || options.length >= 2) {
-                type = 'closed';
-            } else if (openInput || options.length === 0) {
+            if (openInput) {
                 type = 'open';
-                options = [];
+            } else if (shortInput && options.length === 0) {
+                type = 'open';
+            } else if (hasCheckbox && options.length >= 2) {
+                type = 'multiple';
+            } else if (options.length >= 2) {
+                type = 'closed';
+            } else if (hasRadio) {
+                type = 'closed';
             } else if (options.length === 1) {
                 type = 'closed';
+            } else if (shortInput) {
+                type = 'open';
             }
+
+            if (type === 'open') cachedOptionElements = [];
+
+            // Log extraction result for telemetry (non-blocking)
+            try {
+                window.prompt('__makarena_log:' + JSON.stringify({
+                    type: 'dom_extraction',
+                    data: {
+                        questionLen: questionText.length,
+                        questionPreview: questionText.slice(0, 80),
+                        optionCount: options.length,
+                        detectedType: type,
+                        hasRadio: hasRadio,
+                        hasCheckbox: hasCheckbox,
+                        hasOpenInput: !!openInput || !!shortInput,
+                    }
+                }), '');
+            } catch(e) {}
 
             return {
                 type: type,
@@ -207,84 +304,74 @@
                 imageUrl: imgUrl
             };
         } catch (e) {
+            try { window.prompt('__makarena_log:' + JSON.stringify({ type: 'extraction_error', data: { msg: String(e) } }), ''); } catch(ee) {}
             return null;
         }
     }
 
-    // Bezpieczne, niedestrukcyjne wyróżnienie poprawnej opcji
+    // ─── Highlight (persistent, toggle-safe) ──────────────────────────────
+
     function highlightOptionElement(el) {
         if (!el) return;
-
         try {
-            el.style.setProperty('font-weight', '700', 'important');
-            el.style.setProperty('box-shadow', 'inset 4px 0 0 #00c853, 0 1px 3px rgba(0,200,83,0.15)', 'important');
-            el.style.setProperty('background', 'rgba(0, 200, 83, 0.08)', 'important');
-            el.style.setProperty('border-radius', '4px', 'important');
+            el.style.setProperty('outline', '3px solid #ffffff', 'important');
+            el.style.setProperty('background', 'rgba(255,255,255,0.10)', 'important');
+            el.style.setProperty('border-radius', '6px', 'important');
             el.setAttribute('data-makarena-active', '1');
 
-            const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span');
-            if (textEl && textEl !== el) {
+            const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span') || el;
+            if (textEl) {
                 textEl.style.setProperty('font-weight', '800', 'important');
-                textEl.style.setProperty('color', '#00701a', 'important');
+                textEl.style.setProperty('color', '#ffffff', 'important');
             }
 
-            const optImg = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
-            if (optImg) {
-                optImg.style.setProperty('outline', '3px solid #00c853', 'important');
-                optImg.style.setProperty('box-shadow', '0 0 10px rgba(0, 200, 83, 0.7)', 'important');
-                optImg.style.setProperty('border-radius', '6px', 'important');
+            const img = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
+            if (img) {
+                img.style.setProperty('outline', '3px solid #ffffff', 'important');
+                img.style.setProperty('border-radius', '6px', 'important');
             }
 
-            if (!styledOptionElements.includes(el)) {
-                styledOptionElements.push(el);
-            }
+            if (!styledOptionElements.includes(el)) styledOptionElements.push(el);
         } catch(e) {}
     }
 
-    // Cofnięcie wszystkich modyfikacji (zamknięte i otwarte)
     function revertModifications() {
         styledOptionElements.forEach(el => {
             if (!el) return;
             try {
-                el.style.removeProperty('font-weight');
-                el.style.removeProperty('box-shadow');
+                el.style.removeProperty('outline');
                 el.style.removeProperty('background');
                 el.style.removeProperty('border-radius');
                 el.removeAttribute('data-makarena-active');
 
-                const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span');
-                if (textEl && textEl !== el) {
+                const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span') || el;
+                if (textEl) {
                     textEl.style.removeProperty('font-weight');
                     textEl.style.removeProperty('color');
                 }
-
-                const optImg = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
-                if (optImg) {
-                    optImg.style.removeProperty('outline');
-                    optImg.style.removeProperty('box-shadow');
-                    optImg.style.removeProperty('border-radius');
+                const img = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
+                if (img) {
+                    img.style.removeProperty('outline');
+                    img.style.removeProperty('border-radius');
                 }
             } catch(e) {}
         });
         styledOptionElements.length = 0;
 
-        // Przywrócenie pierwotnych wartości w polach otwartych (czyszczenie asysty)
+        // Revert open inputs
         const inputs = document.querySelectorAll(
             '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
         );
         inputs.forEach(input => {
             try {
-                if (input._lastInsertedAnswer && input.value === input._lastInsertedAnswer) {
-                    const origVal = originalValues.get(input) || '';
-                    input.value = origVal;
+                if (input._makarena_inserted && input.value === input._makarena_inserted) {
+                    input.value = originalValues.get(input) || '';
                     input.dispatchEvent(new Event('input', { bubbles: true }));
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 }
-                input._lastInsertedAnswer = null;
-
+                input._makarena_inserted = null;
                 if (originalPlaceholders.has(input)) {
                     input.setAttribute('placeholder', originalPlaceholders.get(input));
-                    input.placeholder = originalPlaceholders.get(input);
                 } else {
                     input.removeAttribute('placeholder');
                 }
@@ -293,103 +380,75 @@
         originalValues.clear();
         originalPlaceholders.clear();
 
-        // Przywrócenie TinyMCE
         const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
         if (iframe) {
             try {
                 const ifrDoc = iframe.contentDocument || iframe.contentWindow.document;
                 if (ifrDoc && ifrDoc.body) {
-                    if (iframe._lastInsertedAnswer && ifrDoc.body.innerText.trim() === iframe._lastInsertedAnswer) {
+                    if (iframe._makarena_inserted && ifrDoc.body.innerText.trim() === iframe._makarena_inserted) {
                         ifrDoc.body.innerHTML = originalTinyMceValues.get(iframe) || '';
                     }
-                    iframe._lastInsertedAnswer = null;
+                    iframe._makarena_inserted = null;
                 }
             } catch(e) {}
         }
         originalTinyMceValues.clear();
     }
 
-    // Aplikowanie podpowiedzi dla pytań jedno- i wielokrotnego wyboru
+    // ─── Apply hints ─────────────────────────────────────────────────────────
+
     function applyClosedHint(indicesArg) {
-        if (isPanicMode) return;
-        if (!window.__makarena_ai_active) return;
+        if (isPanicMode || !window.__makarena_ai_active) return;
 
         revertModifications();
 
         let indices = [];
-        if (Array.isArray(indicesArg)) {
-            indices = indicesArg;
-        } else if (typeof indicesArg === 'number') {
-            indices = [indicesArg];
-        }
+        if (Array.isArray(indicesArg)) indices = indicesArg;
+        else if (typeof indicesArg === 'number') indices = [indicesArg];
 
         lastResolvedIndices = indices;
         if (indices.length === 0) return;
 
+        // Re-scan if cache stale
         let targets = cachedOptionElements;
         if (!targets || targets.length === 0) {
-            const checkboxes = Array.from(document.querySelectorAll('.mdc-checkbox, input[type="checkbox"]'));
-            const radioInputs = Array.from(document.querySelectorAll('.mdc-radio, input[type="radio"]'));
-            if (checkboxes.length > 0) {
-                targets = checkboxes.map(i => i.closest('.question_answer, .answer_container, label, .question_option_wrapper, tr, li') || i.parentElement || i);
-            } else if (radioInputs.length > 0) {
-                targets = radioInputs.map(i => i.closest('.question_answer, .answer_container, label, .question_option_wrapper, tr, li') || i.parentElement || i);
-            } else {
-                targets = Array.from(document.querySelectorAll(
-                    '.question_answers .question_answer, .answer_container, .question_option_wrapper, label.answer, .answer_item, [class*="answer"]'
-                ));
-            }
+            const fresh = findOptionContainers();
+            cachedOptionElements = fresh.map(o => o.el);
+            targets = cachedOptionElements;
         }
 
         indices.forEach(idx => {
-            if (targets && targets[idx]) {
-                highlightOptionElement(targets[idx]);
-            }
+            if (targets && targets[idx]) highlightOptionElement(targets[idx]);
         });
     }
 
-    // Aplikowanie podpowiedzi dla pytań otwartych — BEZ ŻADNYCH DUSZKÓW I BEZ KLIKANIA:
-    // Odpowiedź trafia bezpośrednio w pole tekstowe / edytor natychmiast po włączeniu asysty
+    // Open questions: show answer as placeholder text ONLY (no auto-fill)
+    // The hint disappears when AI is toggled OFF (revertModifications handles that)
     function applyOpenHint(suggestedAnswer) {
-        if (isPanicMode || !suggestedAnswer) return;
-        if (!window.__makarena_ai_active) return;
-
+        if (isPanicMode || !window.__makarena_ai_active) return;
+        if (!suggestedAnswer) return;
         const clean = String(suggestedAnswer).trim();
-        if (clean.length === 0) return;
+        if (!clean || clean.length === 0) return;
         const lower = clean.toLowerCase();
-        if (lower === 'poprawnie' || lower === 'poprawna' || lower === 'prawda' || lower === 'fałsz') {
-            return;
-        }
+        if (lower === 'poprawnie' || lower === 'poprawna' || lower === 'prawda' || lower === 'fałsz' || lower === 'brak') return;
 
         lastResolvedOpenAnswer = clean;
 
-        // 1. Obsługa pól standardowych (input, textarea, div editable)
+        // Placeholder-only approach: never overwrite field value
         const inputs = document.querySelectorAll(
-            '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
+            '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]):not([name*="url"])'
         );
         inputs.forEach(input => {
             try {
                 if (!originalPlaceholders.has(input)) {
                     originalPlaceholders.set(input, input.getAttribute('placeholder') || '');
                 }
-                if (!originalValues.has(input)) {
-                    originalValues.set(input, input.value || '');
-                }
-
-                input.placeholder = clean;
-                input.setAttribute('placeholder', clean);
-
-                // Bezpośrednie wpisanie gotowej odpowiedzi w pole (jeśli puste lub poprzednia sugestia)
-                if (!input.value || input.value === input._lastInsertedAnswer) {
-                    input.value = clean;
-                    input._lastInsertedAnswer = clean;
-                    input.dispatchEvent(new Event('input', { bubbles: true }));
-                    input.dispatchEvent(new Event('change', { bubbles: true }));
-                }
+                input.placeholder = '✦ ' + clean;
+                input.setAttribute('placeholder', '✦ ' + clean);
             } catch(e) {}
         });
 
-        // 2. Obsługa edytora TinyMCE iframe (#givenAnswer_ifr)
+        // TinyMCE: inject inline hint element (overlay text, not actual value)
         const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
         if (iframe) {
             try {
@@ -399,16 +458,17 @@
                         originalTinyMceValues.set(iframe, ifrDoc.body.innerHTML || '');
                     }
                     const curText = ifrDoc.body.innerText.trim();
-                    if (!curText || curText === iframe._lastInsertedAnswer) {
-                        ifrDoc.body.innerHTML = '<p>' + escapeHTML(clean) + '</p>';
-                        iframe._lastInsertedAnswer = clean;
+                    if (!curText || curText === iframe._makarena_inserted) {
+                        ifrDoc.body.innerHTML = '<p style="color:#aaaaaa;font-style:italic;">' + escapeHTML(clean) + '</p>';
+                        iframe._makarena_inserted = clean;
                     }
                 }
             } catch(e) {}
         }
     }
 
-    // Panic Mode — całkowite, natychmiastowe ukrycie wszystkich oznaczeń
+    // ─── Panic / enable ──────────────────────────────────────────────────────
+
     function enablePanicMode() {
         isPanicMode = true;
         window.__makarena_ai_active = false;
@@ -422,26 +482,25 @@
         window.__makarena_ai_active = true;
     }
 
-    // Automatyczne wykrycie i rozwiązanie nowego pytania w trybie ciągłym (Persistent Toggle Mode)
-    function checkAndAutoAnalyzeNewQuestion() {
-        if (isPanicMode) return;
-        if (!window.__makarena_ai_active) return;
-        if (isProcessing) return;
+    // ─── Question change detector ─────────────────────────────────────────
 
-        const newSignature = computeQuestionSignature();
-        if (!newSignature || newSignature === currentQuestionSignature) {
-            return;
-        }
+    function checkAndAutoAnalyzeNewQuestion() {
+        if (isPanicMode || !window.__makarena_ai_active || isProcessing) return;
+
+        const newSig = computeQuestionSignature();
+        // If signature is empty or same as before, do nothing
+        // Empty sig means page hasn't rendered question yet — that's fine, MutationObserver will retry
+        if (!newSig || newSig === '||||' || newSig === currentQuestionSignature) return;
 
         isProcessing = true;
         try {
-            currentQuestionSignature = newSignature;
+            currentQuestionSignature = newSig;
             lastResolvedIndices = [];
             lastResolvedOpenAnswer = '';
             revertModifications();
 
             const qData = extractQuestionData();
-            if (qData && qData.question) {
+            if (qData && qData.question && qData.question.length > 5) {
                 window.prompt('__makarena_bridge:' + JSON.stringify({
                     action: 'questionDataExtracted',
                     data: qData
@@ -452,92 +511,109 @@
         }
     }
 
-    // Strażnik stylów (Style Guardian) — zapobiega znikaniu podświetlenia przy cyklicznym re-renderowaniu DOM przez Testportal
+    // ─── Style guardian (re-apply if DOM re-renders) ────────────────────────
+    // CRITICAL: guardian only re-applies highlight if indices are still valid
+    // and the element lost its marker. It does NOT apply [0] as fallback.
+
     function guardianTick() {
         if (isPanicMode || !window.__makarena_ai_active) return;
 
-        // Sprawdzenie pytań zamkniętych
         if (lastResolvedIndices && lastResolvedIndices.length > 0) {
             let needsReapply = false;
-            lastResolvedIndices.forEach(idx => {
+            for (const idx of lastResolvedIndices) {
                 const el = cachedOptionElements[idx];
                 if (el && !el.hasAttribute('data-makarena-active')) {
                     needsReapply = true;
+                    break;
                 }
-            });
-
-            if (needsReapply) {
-                applyClosedHint(lastResolvedIndices);
             }
+            if (needsReapply) applyClosedHint(lastResolvedIndices);
         }
 
-        // Sprawdzenie pytań otwartych
         if (lastResolvedOpenAnswer) {
-            const inputs = document.querySelectorAll('.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"])');
+            const inputs = document.querySelectorAll(
+                '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"])'
+            );
             let needsReapplyOpen = false;
-            inputs.forEach(input => {
-                if (!input.value && !input.getAttribute('placeholder')) {
+            for (const input of inputs) {
+                if (!input.getAttribute('placeholder') || !input.getAttribute('placeholder').includes(lastResolvedOpenAnswer.slice(0, 10))) {
                     needsReapplyOpen = true;
+                    break;
                 }
-            });
-            if (needsReapplyOpen) {
-                applyOpenHint(lastResolvedOpenAnswer);
             }
+            if (needsReapplyOpen) applyOpenHint(lastResolvedOpenAnswer);
         }
     }
 
-    // Obserwator zmian DOM (przejścia SPA / AJAX między pytaniami)
+    // ─── DOM observation ─────────────────────────────────────────────────────
+
+    let mutationPending = false;
     const mutationObserver = new MutationObserver(function() {
         if (isPanicMode || !window.__makarena_ai_active) return;
-        checkAndAutoAnalyzeNewQuestion();
-        guardianTick();
+        if (mutationPending) return;
+        mutationPending = true;
+        // Debounce: process mutations after 200ms silence
+        setTimeout(function() {
+            mutationPending = false;
+            checkAndAutoAnalyzeNewQuestion();
+            guardianTick();
+        }, 200);
     });
 
     function startObserving() {
         if (document.body) {
-            mutationObserver.observe(document.body, { childList: true, subtree: true });
+            mutationObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
         } else {
             document.addEventListener('DOMContentLoaded', function() {
                 if (document.body) {
-                    mutationObserver.observe(document.body, { childList: true, subtree: true });
+                    mutationObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
                 }
             });
         }
     }
     startObserving();
 
-    // Ciągły strażnik z interwałem 350ms
+    // Periodic guardian — 500ms interval
     setInterval(function() {
         if (isPanicMode || !window.__makarena_ai_active) return;
         checkAndAutoAnalyzeNewQuestion();
         guardianTick();
-    }, 350);
+    }, 500);
 
-    // Nasłuch zdarzeń sterowania z natywnego kodu Kotlin (2x głośność w dół = toggle, 2x w górę = panic)
+    // ─── Native bridge event listener ────────────────────────────────────────
+
     document.addEventListener('__makarena_action', function(e) {
         if (!e || !e.detail) return;
         const action = e.detail.action;
 
         if (action === 'enable' || action === 'analyze') {
             disablePanicMode();
+            // Reset signature to force re-analysis of current question
             currentQuestionSignature = '';
-            checkAndAutoAnalyzeNewQuestion();
+            lastResolvedIndices = [];
+            lastResolvedOpenAnswer = '';
+            revertModifications();
+            // Delay to let Vue/Angular finish any pending renders
+            setTimeout(checkAndAutoAnalyzeNewQuestion, 300);
         } else if (action === 'disable' || action === 'panic') {
             enablePanicMode();
         } else if (action === 'applyClosed') {
             if (isPanicMode || !window.__makarena_ai_active) return;
-            const indices = e.detail.correctIndices !== undefined ? e.detail.correctIndices : [e.detail.correctIndex];
-            applyClosedHint(indices);
+            const raw = e.detail.correctIndices;
+            // SAFETY: only apply if we actually got a non-empty array
+            if (!Array.isArray(raw) || raw.length === 0) return;
+            applyClosedHint(raw);
         } else if (action === 'applyOpen') {
             if (isPanicMode || !window.__makarena_ai_active) return;
             applyOpenHint(e.detail.answerText);
         }
     });
 
-    // Inicjalizacja przy załadowaniu strony
+    // Initial trigger on page load
     setTimeout(function() {
         if (window.__makarena_ai_active && !isPanicMode) {
             checkAndAutoAnalyzeNewQuestion();
         }
-    }, 300);
+    }, 600);
+
 })();

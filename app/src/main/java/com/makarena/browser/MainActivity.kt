@@ -463,11 +463,12 @@ class MainActivity : AppCompatActivity() {
     private fun updateStatusPill(animate: Boolean) {
         if (isAIActive) {
             statusDot.setBackgroundColor(android.graphics.Color.WHITE)
-            statusText.text = "AI AKTYWNE"
+            statusText.text = "I GOT U DAWG"
+            statusPill.visibility = View.VISIBLE
             statusPill.alpha = 1f
         } else {
-            statusText.text = "PANIC"
             statusPill.alpha = 0f
+            statusPill.visibility = View.INVISIBLE
         }
     }
 
