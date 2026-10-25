@@ -94,8 +94,8 @@ class MainActivity : AppCompatActivity() {
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         settings.cacheMode = WebSettings.LOAD_DEFAULT
 
-        // Autentyczny User-Agent Google Chrome dla Android 14
-        settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.39 Mobile Safari/537.36"
+        // Autentyczny User-Agent Google Chrome dla Android (zgodny ze specyfikacją User-Agent Reduction)
+        settings.userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
         // 2. Całkowite wyłączenie nagłówka X-Requested-With (identyfikatora WebView)
         if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
@@ -104,7 +104,8 @@ class MainActivity : AppCompatActivity() {
 
         // 3. Natywna iniekcja Document-Start (skrypt wykonuje się przed jakimkolwiek JS strony)
         val bypassScript = loadAssetScript("testportal_bypass.js")
-        if (bypassScript.isNotEmpty() && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+        val hasDocStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+        if (bypassScript.isNotEmpty() && hasDocStart) {
             WebViewCompat.addDocumentStartJavaScript(webView, bypassScript, setOf("*"))
         }
 
@@ -118,8 +119,8 @@ class MainActivity : AppCompatActivity() {
                 progressBar.visibility = View.VISIBLE
                 editUrl.setText(url ?: "")
 
-                // Zapasowa iniekcja przy starcie strony
-                if (bypassScript.isNotEmpty()) {
+                // Iniekcja zapasowa wyłącznie na urządzeniach bez natywnego DOCUMENT_START_SCRIPT
+                if (!hasDocStart && bypassScript.isNotEmpty()) {
                     view?.evaluateJavascript(bypassScript, null)
                 }
             }
@@ -149,9 +150,6 @@ class MainActivity : AppCompatActivity() {
         webView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 super.onProgressChanged(view, newProgress)
-                if (newProgress in 15..80 && bypassScript.isNotEmpty()) {
-                    view?.evaluateJavascript(bypassScript, null)
-                }
             }
 
             override fun onJsPrompt(
