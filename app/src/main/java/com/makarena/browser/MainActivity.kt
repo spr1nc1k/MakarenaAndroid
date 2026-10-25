@@ -17,6 +17,9 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -72,32 +75,64 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
+        // 1. Zapewnienie pełnej obsługi ciasteczek sesyjnych i 3rd-party dla serwisów autoryzacyjnych
+        val cookieManager = CookieManager.getInstance()
+        cookieManager.setAcceptCookie(true)
+        cookieManager.setAcceptThirdPartyCookies(webView, true)
+
         val settings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
+        settings.allowFileAccess = false
+        settings.allowContentAccess = true
+        settings.setSupportMultipleWindows(false)
+        settings.javaScriptCanOpenWindowsAutomatically = true
         settings.mediaPlaybackRequiresUserGesture = false
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-        settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        settings.cacheMode = WebSettings.LOAD_DEFAULT
+
+        // Autentyczny User-Agent Google Chrome dla Android 14
+        settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.39 Mobile Safari/537.36"
+
+        // 2. Całkowite wyłączenie nagłówka X-Requested-With (identyfikatora WebView)
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
+            WebSettingsCompat.setRequestedWithHeaderOriginAllowList(settings, emptySet())
+        }
+
+        // 3. Natywna iniekcja Document-Start (skrypt wykonuje się przed jakimkolwiek JS strony)
+        val bypassScript = loadAssetScript("testportal_bypass.js")
+        if (bypassScript.isNotEmpty() && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            WebViewCompat.addDocumentStartJavaScript(webView, bypassScript, setOf("*"))
+        }
 
         webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                return false
+            }
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 progressBar.visibility = View.VISIBLE
                 editUrl.setText(url ?: "")
 
-                // 1. Iniekcja bypass na początku dokumentu
-                val bypassScript = loadAssetScript("testportal_bypass.js")
-                webView.evaluateJavascript(bypassScript, null)
+                // Zapasowa iniekcja przy starcie strony
+                if (bypassScript.isNotEmpty()) {
+                    view?.evaluateJavascript(bypassScript, null)
+                }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 progressBar.visibility = View.GONE
 
-                // 2. Iniekcja ai_injector.js
+                // Iniekcja silnika analizy pytań i nakładek
                 val injectorScript = loadAssetScript("ai_injector.js")
-                webView.evaluateJavascript(injectorScript, null)
+                if (injectorScript.isNotEmpty()) {
+                    view?.evaluateJavascript(injectorScript, null)
+                }
 
                 // Jeśli asystent jest włączony (tryb przełącznika), automatycznie analizujemy nowe pytanie
                 if (isAIActive) {
@@ -112,6 +147,13 @@ class MainActivity : AppCompatActivity() {
 
         // Stealth IPC przez onJsPrompt (brak fingerprintów addJavascriptInterface)
         webView.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                super.onProgressChanged(view, newProgress)
+                if (newProgress in 15..80 && bypassScript.isNotEmpty()) {
+                    view?.evaluateJavascript(bypassScript, null)
+                }
+            }
+
             override fun onJsPrompt(
                 view: WebView?,
                 url: String?,
@@ -149,124 +191,118 @@ class MainActivity : AppCompatActivity() {
                 }
                 webView.loadUrl(url)
                 true
-            } else false
+            } else {
+                false
+            }
         }
 
-        // Podwójne kliknięcie dolnego paska jako alternatywny przełącznik
-        var lastGestureTap = 0L
-        gestureStrip.setOnClickListener {
+        // Niewidoczny pasek gestów u dołu: potrójne kliknięcie jako alternatywny wyzwalacz AI
+        gestureStrip.setOnClickListener(object : View.OnClickListener {
+            private var lastTap = 0L
+            private var tapCount = 0
+
+            override fun onClick(v: View?) {
+                val now = System.currentTimeMillis()
+                if (now - lastTap < 400) {
+                    tapCount++
+                    if (tapCount >= 2) { // 3 tapnięcia
+                        tapCount = 0
+                        toggleAIAssistant()
+                    }
+                } else {
+                    tapCount = 0
+                }
+                lastTap = now
+            }
+        })
+    }
+
+    // Przechwytywanie klawiszy głośności:
+    // 2x głośność w dół = WŁĄCZ / WYŁĄCZ (przełącznik permanentny)
+    // 2x głośność w górę = PANIC MODE
+    override fun dispatchKeyEvent(event: KeyEvent?): Boolean {
+        if (event?.action == KeyEvent.ACTION_DOWN) {
             val now = System.currentTimeMillis()
-            if (now - lastGestureTap < 400) {
-                toggleAI()
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                    volumeDownTimestamps.add(now)
+                    volumeDownTimestamps.removeAll { now - it > 500 }
+                    if (volumeDownTimestamps.size >= 2) {
+                        volumeDownTimestamps.clear()
+                        toggleAIAssistant()
+                        return true
+                    }
+                }
+                KeyEvent.KEYCODE_VOLUME_UP -> {
+                    volumeUpTimestamps.add(now)
+                    volumeUpTimestamps.removeAll { now - it > 500 }
+                    if (volumeUpTimestamps.size >= 2) {
+                        volumeUpTimestamps.clear()
+                        triggerPanicMode()
+                        return true
+                    }
+                }
             }
-            lastGestureTap = now
         }
+        return super.dispatchKeyEvent(event)
     }
 
-    // Intercepcja fizycznych klawiszy głośności (2x ciszej = WŁĄCZ/WYŁĄCZ, 2x głośniej = Panic Mode)
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        val now = System.currentTimeMillis()
+    private fun toggleAIAssistant() {
+        isAIActive = !isAIActive
 
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-            cleanTimestamps(volumeDownTimestamps, now)
-            volumeDownTimestamps.add(now)
-            if (volumeDownTimestamps.size >= 2) {
-                volumeDownTimestamps.clear()
-                toggleAI()
-            }
-            return true // blokuje systemowe OSD głośności
-        } else if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            cleanTimestamps(volumeUpTimestamps, now)
-            volumeUpTimestamps.add(now)
-            if (volumeUpTimestamps.size >= 2) {
-                volumeUpTimestamps.clear()
-                triggerPanicMode()
-            }
-            return true
-        }
+        // Zapisanie trwałego stanu w SharedPreferences
+        val prefs = getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("is_ai_active", isAIActive).apply()
 
-        return super.onKeyDown(keyCode, event)
-    }
+        updateStatusPill(true)
 
-    private fun cleanTimestamps(list: MutableList<Long>, now: Long) {
-        list.removeAll { now - it > 1200 }
-    }
-
-    private fun toggleAI() {
         if (isAIActive) {
-            triggerPanicMode()
-        } else {
             triggerAIAnalysis()
+        } else {
+            triggerPanicMode()
         }
     }
 
     private fun triggerAIAnalysis() {
-        isAIActive = true
-        saveAIState(true)
-        updateStatusPill(true)
-
         val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'analyze' } }));"
         webView.evaluateJavascript(js, null)
     }
 
     private fun triggerPanicMode() {
-        isAIActive = false
-        saveAIState(false)
-        updateStatusPill(false)
-
         val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'panic' } }));"
         webView.evaluateJavascript(js, null)
     }
 
-    private fun saveAIState(active: Boolean) {
-        getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean("is_ai_active", active)
-            .apply()
-    }
-
-    private fun updateStatusPill(isTemporaryAlert: Boolean) {
-        statusPill.visibility = View.VISIBLE
+    private fun updateStatusPill(animate: Boolean) {
         if (isAIActive) {
-            statusDot.setBackgroundColor(getColor(R.color.neon_green))
-            statusText.text = getString(R.string.ai_active)
+            statusDot.setBackgroundResource(R.drawable.bg_circle_btn)
+            statusText.text = "AI AKTYWNE"
+            statusPill.alpha = 1f
         } else {
-            statusDot.setBackgroundColor(getColor(R.color.neon_red))
-            statusText.text = getString(R.string.panic_mode)
-        }
-
-        if (isTemporaryAlert) {
-            mainHandler.removeCallbacksAndMessages(null)
-            mainHandler.postDelayed({
-                if (!isAIActive) {
-                    statusPill.visibility = View.GONE
-                }
-            }, 1800)
+            statusText.text = "PANIC"
+            statusPill.alpha = 0f
         }
     }
 
     private fun handleBridgePayload(payload: String) {
-        lifecycleScope.launch(Dispatchers.Default) {
+        lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val json = JSONObject(payload)
-                if (json.optString("action") != "questionDataExtracted") return@launch
+                val action = json.optString("action")
+                if (action != "questionDataExtracted") return@launch
+
                 val data = json.getJSONObject("data")
                 val type = data.optString("type")
                 val question = data.optString("question")
                 val isMultiple = (type == "multiple")
-                val imageUrl = data.optString("imageUrl").takeIf { it.isNotEmpty() }
-
-                // Pobranie grafiki jeśli występuje w pytaniu
-                var imageBase64: String? = null
-                if (imageUrl != null) {
-                    imageBase64 = fetchImageBase64(imageUrl)
-                }
+                val imageUrl = data.optString("imageUrl", "")
+                val imageBase64 = if (imageUrl.isNotEmpty()) fetchImageBase64(imageUrl) else data.optString("imageBase64", null)
 
                 if (type == "closed" || type == "multiple") {
-                    val optsJson = data.getJSONArray("options")
+                    val optionsArr = data.getJSONArray("options")
                     val options = mutableListOf<String>()
-                    for (i in 0 until optsJson.length()) {
-                        options.add(optsJson.getJSONObject(i).optString("text"))
+                    for (i in 0 until optionsArr.length()) {
+                        options.add(optionsArr.getJSONObject(i).optString("text"))
                     }
 
                     val correctIndices = AIService.solveClosedQuestion(
