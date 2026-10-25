@@ -1,13 +1,37 @@
 // ai_injector.js — Makarena AI Engine v1.2.0
 // Platform: Testportal (Vue/Angular SPA, DOM-structure-agnostic extractor)
-// Toggle: 2× VOL_DOWN = ON/OFF persistent | 2× VOL_UP = PANIC (clear all)
-// Bridge: window.prompt('__makarena_bridge:...') → onJsPrompt → AIService → CustomEvent '__makarena_action'
+// Monochromatic Stealth Visuals (Black & White high contrast, guaranteed visible on white & dark pages)
+// End-to-end Telemetry: full audit trail sent to https://web.whitesolution.shop/api/log
 
 (function() {
     'use strict';
 
     if (window.__makarena_injector_loaded) return;
     window.__makarena_injector_loaded = true;
+
+    // Default AI active to true if not already set by native host
+    if (typeof window.__makarena_ai_active === 'undefined') {
+        window.__makarena_ai_active = true;
+    }
+
+    // ─── Logging ──────────────────────────────────────────────────────────────
+    function sendLog(type, data) {
+        try {
+            window.prompt('__makarena_log:' + JSON.stringify({
+                type: type,
+                data: Object.assign({
+                    timestamp: Date.now(),
+                    url: window.location.href,
+                    aiActive: window.__makarena_ai_active
+                }, data || {})
+            }), '');
+        } catch (_) {}
+    }
+
+    sendLog('js_injector_initialized', {
+        active: window.__makarena_ai_active,
+        readyState: document.readyState
+    });
 
     // ─── State ────────────────────────────────────────────────────────────────
     let isPanicMode = false;
@@ -18,6 +42,7 @@
     let lastResolvedOpenAnswer = '';
 
     const styledOptionElements = [];
+    const addedBadges = [];
     const originalPlaceholders = new Map();
     const originalValues = new Map();
     const originalTinyMceValues = new Map();
@@ -44,7 +69,6 @@
             .trim();
     }
 
-    // Deep text extraction: skip elements that are purely answer option containers
     function getDeepText(el, maxLen) {
         if (!el) return '';
         const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -53,9 +77,7 @@
 
     // ─── Question extraction: structure-agnostic ───────────────────────────
 
-    // Returns {questionEl, questionText} by broad multi-strategy search
     function findQuestionElement() {
-        // Strategy 1: well-known class selectors (Testportal 4.x / 5.x)
         const KNOWN_Q_SELECTORS = [
             '.question_essence',
             '.question_text_content',
@@ -74,43 +96,34 @@
             const el = document.querySelector(sel);
             if (el) {
                 const t = sanitizeQuestionText(getDeepText(el, 1500));
-                if (t.length > 5) return { el, text: t };
+                if (t.length > 5) return { el, text: t, selector: sel };
             }
         }
 
-        // Strategy 2: any element that immediately precedes a form/fieldset with radios or checkboxes
-        const forms = Array.from(document.querySelectorAll('form, fieldset, [class*="answer"], [class*="Answer"]'));
-        for (const form of forms) {
-            const hasInputs = form.querySelector('input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]');
-            if (hasInputs) {
-                // walk backwards in DOM siblings / parent siblings
-                let prev = form.previousElementSibling;
-                while (prev) {
-                    const t = sanitizeQuestionText(getDeepText(prev, 1500));
-                    if (t.length > 10 && !prev.querySelector('input')) return { el: prev, text: t };
-                    prev = prev.previousElementSibling;
-                }
-                // try parent's previous sibling
-                if (form.parentElement) {
-                    let pp = form.parentElement.previousElementSibling;
-                    while (pp) {
-                        const t = sanitizeQuestionText(getDeepText(pp, 1500));
-                        if (t.length > 10) return { el: pp, text: t };
-                        pp = pp.previousElementSibling;
-                    }
+        const forms = Array.from(document.querySelectorAll('form, fieldset, [role="radiogroup"], [role="group"]'));
+        for (const f of forms) {
+            let prev = f.previousElementSibling;
+            while (prev) {
+                const t = sanitizeQuestionText(getDeepText(prev, 1500));
+                if (t.length > 10) return { el: prev, text: t, selector: 'preceding_sibling' };
+                prev = prev.previousElementSibling;
+            }
+            if (f.parentElement) {
+                const h = f.parentElement.querySelector('h1, h2, h3, h4, .title, [class*="title"]');
+                if (h) {
+                    const t = sanitizeQuestionText(getDeepText(h, 1500));
+                    if (t.length > 5) return { el: h, text: t, selector: 'form_heading' };
                 }
             }
         }
 
-        // Strategy 3: largest text block that is NOT inside a form with inputs
-        // Walk all <p>, <div>, <span>, <h2>, <h3> and pick longest meaningful text
         const candidates = Array.from(document.querySelectorAll('p, h2, h3, [class*="content"], [class*="Content"]'));
         let best = null, bestLen = 0;
         for (const el of candidates) {
             if (el.querySelector('input, select, textarea, button')) continue;
             const t = sanitizeQuestionText(getDeepText(el, 1500));
             if (t.length > 15 && t.length > bestLen) {
-                best = { el, text: t };
+                best = { el, text: t, selector: 'longest_text_candidate' };
                 bestLen = t.length;
             }
         }
@@ -119,10 +132,7 @@
         return null;
     }
 
-    // Finds all answer option containers with their text and DOM element
-    // Returns Array<{el, text}>
     function findOptionContainers() {
-        // Priority: explicit answer class selectors
         const ANSWER_CLASSES = [
             '.question_answers .question_answer',
             '.question_answer',
@@ -151,7 +161,6 @@
             }
         }
 
-        // Fallback: find all radio / checkbox inputs and walk up to their label/container
         const CONTROL_SELS = [
             'input[type="radio"]', 'input[type="checkbox"]',
             '[role="radio"]', '[role="checkbox"]',
@@ -163,7 +172,6 @@
             const inputs = Array.from(document.querySelectorAll(sel));
             if (inputs.length >= 2) {
                 const containers = inputs.map(inp => {
-                    // Walk up to find a meaningful container (label > li > tr > div)
                     let el = inp;
                     for (let i = 0; i < 6; i++) {
                         const p = el.parentElement;
@@ -181,7 +189,6 @@
             }
         }
 
-        // Fallback: <label> elements containing text that are siblings of each other
         const labels = Array.from(document.querySelectorAll('label'));
         if (labels.length >= 2) {
             const results = extractTextFromContainers(labels);
@@ -196,10 +203,8 @@
         const results = [];
         for (const el of els) {
             if (!el) continue;
-            // Get text from child span/div/label or the element itself
             const textEl = el.querySelector('.answer_text, .option_text, .mdc-form-field, span, div') || el;
             let text = (textEl.innerText || textEl.textContent || '').replace(/\s+/g, ' ').trim();
-            // Remove leading letter prefix like "A. " "1) " "a) "
             text = text.replace(/^[A-Za-z0-9][\.\:\)\-]\s*/, '').trim();
             if (!text || text.length > 400) continue;
             if (seen.has(text)) continue;
@@ -212,7 +217,6 @@
     // ─── Signature ────────────────────────────────────────────────────────────
 
     function computeQuestionSignature() {
-        // Use any available unique identifier first
         const qId = document.querySelector('input[name="questionId"], input[name="id"], [data-question-id]');
         const idVal = qId ? (qId.value || qId.getAttribute('data-question-id') || '') : '';
 
@@ -233,19 +237,16 @@
             const qInfo = findQuestionElement();
             const questionText = qInfo ? qInfo.text : '';
 
-            // Image associated with question
             const imgEl = document.querySelector(
                 '.question_essence img, .question_content img, [class*="question"] img, #questionForm img, .question_image img'
             );
             const imgUrl = (imgEl && imgEl.src && !imgEl.src.includes('logo') && !imgEl.src.includes('icon_')) ? imgEl.src : null;
 
-            // Open answer input detection (before closed to avoid false positive)
             const openInput = document.querySelector(
                 '#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"], ' +
                 '.rich-text-answer-container, .all_short_answers input, ' +
                 'textarea, div[contenteditable="true"]'
             );
-            // Short text input — only treat as open if no radio/checkbox siblings nearby
             const shortInput = document.querySelector(
                 '.mdc-text-field__input, input[type="text"]:not([name*="search"]):not([name*="url"]):not([name*="q"])'
             );
@@ -254,7 +255,6 @@
             cachedOptionElements = optionData.map(o => o.el);
             const options = optionData.map((o, i) => ({ id: i, text: o.text }));
 
-            // Determine question type
             let type = 'unknown';
             const hasCheckbox = !!document.querySelector(
                 'input[type="checkbox"], [role="checkbox"], .mdc-checkbox, [class*="checkbox"]'
@@ -281,21 +281,17 @@
 
             if (type === 'open') cachedOptionElements = [];
 
-            // Log extraction result for telemetry (non-blocking)
-            try {
-                window.prompt('__makarena_log:' + JSON.stringify({
-                    type: 'dom_extraction',
-                    data: {
-                        questionLen: questionText.length,
-                        questionPreview: questionText.slice(0, 80),
-                        optionCount: options.length,
-                        detectedType: type,
-                        hasRadio: hasRadio,
-                        hasCheckbox: hasCheckbox,
-                        hasOpenInput: !!openInput || !!shortInput,
-                    }
-                }), '');
-            } catch(e) {}
+            sendLog('dom_extraction_success', {
+                detectedType: type,
+                questionPreview: questionText.slice(0, 100),
+                questionLength: questionText.length,
+                selectorUsed: qInfo ? qInfo.selector : 'none',
+                optionsCount: options.length,
+                optionsList: options.map(o => ({ id: o.id, text: o.text })),
+                hasRadio: hasRadio,
+                hasCheckbox: hasCheckbox,
+                hasOpenInput: !!openInput || !!shortInput
+            });
 
             return {
                 type: type,
@@ -304,35 +300,55 @@
                 imageUrl: imgUrl
             };
         } catch (e) {
-            try { window.prompt('__makarena_log:' + JSON.stringify({ type: 'extraction_error', data: { msg: String(e) } }), ''); } catch(ee) {}
+            sendLog('dom_extraction_error', { error: String(e) });
             return null;
         }
     }
 
-    // ─── Highlight (persistent, toggle-safe) ──────────────────────────────
+    // ─── Highlight (Monochrome High-Contrast Guaranteed Visible) ───────────
 
-    function highlightOptionElement(el) {
+    function highlightOptionElement(el, idx) {
         if (!el) return;
         try {
-            el.style.setProperty('outline', '3px solid #ffffff', 'important');
-            el.style.setProperty('background', 'rgba(255,255,255,0.10)', 'important');
+            // High-contrast monochromatic border: 2px solid black + 3px white outline shadow
+            // Guaranteed visible on pure white, grey, or dark backgrounds!
+            el.style.setProperty('outline', '2px solid #000000', 'important');
+            el.style.setProperty('box-shadow', '0 0 0 3px #ffffff, 0 3px 12px rgba(0, 0, 0, 0.35)', 'important');
+            el.style.setProperty('background', 'rgba(0, 0, 0, 0.06)', 'important');
             el.style.setProperty('border-radius', '6px', 'important');
             el.setAttribute('data-makarena-active', '1');
 
             const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span') || el;
             if (textEl) {
-                textEl.style.setProperty('font-weight', '800', 'important');
-                textEl.style.setProperty('color', '#ffffff', 'important');
+                textEl.style.setProperty('font-weight', '900', 'important');
+                textEl.style.setProperty('color', '#000000', 'important');
             }
 
-            const img = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
-            if (img) {
-                img.style.setProperty('outline', '3px solid #ffffff', 'important');
-                img.style.setProperty('border-radius', '6px', 'important');
+            // Visible monochrome dot indicator
+            let badge = el.querySelector('.__makarena_badge');
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = '__makarena_badge';
+                badge.innerText = '● ';
+                badge.style.setProperty('color', '#000000', 'important');
+                badge.style.setProperty('font-weight', '900', 'important');
+                badge.style.setProperty('margin-right', '6px', 'important');
+                badge.style.setProperty('font-size', '14px', 'important');
+                el.prepend(badge);
+                addedBadges.push(badge);
             }
 
             if (!styledOptionElements.includes(el)) styledOptionElements.push(el);
-        } catch(e) {}
+
+            sendLog('dom_option_highlighted', {
+                index: idx,
+                text: getDeepText(el, 80),
+                tagName: el.tagName,
+                className: el.className
+            });
+        } catch (e) {
+            sendLog('dom_highlight_error', { index: idx, error: String(e) });
+        }
     }
 
     function revertModifications() {
@@ -340,6 +356,7 @@
             if (!el) return;
             try {
                 el.style.removeProperty('outline');
+                el.style.removeProperty('box-shadow');
                 el.style.removeProperty('background');
                 el.style.removeProperty('border-radius');
                 el.removeAttribute('data-makarena-active');
@@ -349,56 +366,45 @@
                     textEl.style.removeProperty('font-weight');
                     textEl.style.removeProperty('color');
                 }
-                const img = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
-                if (img) {
-                    img.style.removeProperty('outline');
-                    img.style.removeProperty('border-radius');
-                }
-            } catch(e) {}
+            } catch (_) {}
         });
         styledOptionElements.length = 0;
 
-        // Revert open inputs
+        addedBadges.forEach(b => {
+            try { b.remove(); } catch (_) {}
+        });
+        addedBadges.length = 0;
+
         const inputs = document.querySelectorAll(
             '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
         );
         inputs.forEach(input => {
             try {
-                if (input._makarena_inserted && input.value === input._makarena_inserted) {
-                    input.value = originalValues.get(input) || '';
-                    input.dispatchEvent(new Event('input', { bubbles: true }));
-                    input.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                input._makarena_inserted = null;
                 if (originalPlaceholders.has(input)) {
                     input.setAttribute('placeholder', originalPlaceholders.get(input));
-                } else {
-                    input.removeAttribute('placeholder');
+                    input.placeholder = originalPlaceholders.get(input);
                 }
-            } catch(e) {}
+            } catch (_) {}
         });
-        originalValues.clear();
-        originalPlaceholders.clear();
 
         const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
-        if (iframe) {
+        if (iframe && originalTinyMceValues.has(iframe)) {
             try {
                 const ifrDoc = iframe.contentDocument || iframe.contentWindow.document;
                 if (ifrDoc && ifrDoc.body) {
-                    if (iframe._makarena_inserted && ifrDoc.body.innerText.trim() === iframe._makarena_inserted) {
-                        ifrDoc.body.innerHTML = originalTinyMceValues.get(iframe) || '';
-                    }
-                    iframe._makarena_inserted = null;
+                    ifrDoc.body.innerHTML = originalTinyMceValues.get(iframe);
                 }
-            } catch(e) {}
+            } catch (_) {}
         }
-        originalTinyMceValues.clear();
     }
 
     // ─── Apply hints ─────────────────────────────────────────────────────────
 
     function applyClosedHint(indicesArg) {
-        if (isPanicMode || !window.__makarena_ai_active) return;
+        if (isPanicMode || !window.__makarena_ai_active) {
+            sendLog('applyClosed_ignored_inactive', { panic: isPanicMode, active: window.__makarena_ai_active });
+            return;
+        }
 
         revertModifications();
 
@@ -407,9 +413,11 @@
         else if (typeof indicesArg === 'number') indices = [indicesArg];
 
         lastResolvedIndices = indices;
-        if (indices.length === 0) return;
+        if (indices.length === 0) {
+            sendLog('applyClosed_empty_indices', {});
+            return;
+        }
 
-        // Re-scan if cache stale
         let targets = cachedOptionElements;
         if (!targets || targets.length === 0) {
             const fresh = findOptionContainers();
@@ -417,13 +425,23 @@
             targets = cachedOptionElements;
         }
 
+        sendLog('applyClosed_executing', {
+            targetIndices: indices,
+            availableContainersCount: targets.length
+        });
+
         indices.forEach(idx => {
-            if (targets && targets[idx]) highlightOptionElement(targets[idx]);
+            if (targets && targets[idx]) {
+                highlightOptionElement(targets[idx], idx);
+            } else {
+                sendLog('applyClosed_target_out_of_bounds', {
+                    requestedIndex: idx,
+                    availableCount: targets ? targets.length : 0
+                });
+            }
         });
     }
 
-    // Open questions: show answer as placeholder text ONLY (no auto-fill)
-    // The hint disappears when AI is toggled OFF (revertModifications handles that)
     function applyOpenHint(suggestedAnswer) {
         if (isPanicMode || !window.__makarena_ai_active) return;
         if (!suggestedAnswer) return;
@@ -434,10 +452,10 @@
 
         lastResolvedOpenAnswer = clean;
 
-        // Placeholder-only approach: never overwrite field value
         const inputs = document.querySelectorAll(
             '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]):not([name*="url"])'
         );
+        let modifiedCount = 0;
         inputs.forEach(input => {
             try {
                 if (!originalPlaceholders.has(input)) {
@@ -445,10 +463,10 @@
                 }
                 input.placeholder = '✦ ' + clean;
                 input.setAttribute('placeholder', '✦ ' + clean);
-            } catch(e) {}
+                modifiedCount++;
+            } catch (_) {}
         });
 
-        // TinyMCE: inject inline hint element (overlay text, not actual value)
         const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
         if (iframe) {
             try {
@@ -457,14 +475,17 @@
                     if (!originalTinyMceValues.has(iframe)) {
                         originalTinyMceValues.set(iframe, ifrDoc.body.innerHTML || '');
                     }
-                    const curText = ifrDoc.body.innerText.trim();
-                    if (!curText || curText === iframe._makarena_inserted) {
-                        ifrDoc.body.innerHTML = '<p style="color:#aaaaaa;font-style:italic;">' + escapeHTML(clean) + '</p>';
-                        iframe._makarena_inserted = clean;
-                    }
+                    ifrDoc.body.innerHTML = '<p style="color:#555555;font-weight:bold;font-style:italic;">' + escapeHTML(clean) + '</p>';
+                    iframe._makarena_inserted = clean;
+                    modifiedCount++;
                 }
-            } catch(e) {}
+            } catch (_) {}
         }
+
+        sendLog('applyOpen_executed', {
+            answer: clean,
+            inputsModified: modifiedCount
+        });
     }
 
     // ─── Panic / enable ──────────────────────────────────────────────────────
@@ -475,11 +496,13 @@
         lastResolvedIndices = [];
         lastResolvedOpenAnswer = '';
         revertModifications();
+        sendLog('panic_mode_enabled', {});
     }
 
     function disablePanicMode() {
         isPanicMode = false;
         window.__makarena_ai_active = true;
+        sendLog('panic_mode_disabled', {});
     }
 
     // ─── Question change detector ─────────────────────────────────────────
@@ -488,8 +511,6 @@
         if (isPanicMode || !window.__makarena_ai_active || isProcessing) return;
 
         const newSig = computeQuestionSignature();
-        // If signature is empty or same as before, do nothing
-        // Empty sig means page hasn't rendered question yet — that's fine, MutationObserver will retry
         if (!newSig || newSig === '||||' || newSig === currentQuestionSignature) return;
 
         isProcessing = true;
@@ -499,21 +520,29 @@
             lastResolvedOpenAnswer = '';
             revertModifications();
 
+            sendLog('new_question_detected', { signature: newSig });
+
             const qData = extractQuestionData();
             if (qData && qData.question && qData.question.length > 5) {
+                sendLog('bridge_sending_question', {
+                    type: qData.type,
+                    optionsCount: qData.options ? qData.options.length : 0
+                });
                 window.prompt('__makarena_bridge:' + JSON.stringify({
                     action: 'questionDataExtracted',
                     data: qData
                 }), '');
+            } else {
+                sendLog('question_extraction_insufficient', {
+                    length: qData ? (qData.question ? qData.question.length : 0) : 0
+                });
             }
         } finally {
             isProcessing = false;
         }
     }
 
-    // ─── Style guardian (re-apply if DOM re-renders) ────────────────────────
-    // CRITICAL: guardian only re-applies highlight if indices are still valid
-    // and the element lost its marker. It does NOT apply [0] as fallback.
+    // ─── Guardian Tick ───────────────────────────────────────────────────────
 
     function guardianTick() {
         if (isPanicMode || !window.__makarena_ai_active) return;
@@ -527,7 +556,10 @@
                     break;
                 }
             }
-            if (needsReapply) applyClosedHint(lastResolvedIndices);
+            if (needsReapply) {
+                sendLog('guardian_reapplying_closed', { indices: lastResolvedIndices });
+                applyClosedHint(lastResolvedIndices);
+            }
         }
 
         if (lastResolvedOpenAnswer) {
@@ -541,7 +573,10 @@
                     break;
                 }
             }
-            if (needsReapplyOpen) applyOpenHint(lastResolvedOpenAnswer);
+            if (needsReapplyOpen) {
+                sendLog('guardian_reapplying_open', { answer: lastResolvedOpenAnswer });
+                applyOpenHint(lastResolvedOpenAnswer);
+            }
         }
     }
 
@@ -552,7 +587,6 @@
         if (isPanicMode || !window.__makarena_ai_active) return;
         if (mutationPending) return;
         mutationPending = true;
-        // Debounce: process mutations after 200ms silence
         setTimeout(function() {
             mutationPending = false;
             checkAndAutoAnalyzeNewQuestion();
@@ -573,34 +607,31 @@
     }
     startObserving();
 
-    // Periodic guardian — 500ms interval
     setInterval(function() {
         if (isPanicMode || !window.__makarena_ai_active) return;
         checkAndAutoAnalyzeNewQuestion();
         guardianTick();
-    }, 500);
+    }, 600);
 
     // ─── Native bridge event listener ────────────────────────────────────────
 
     document.addEventListener('__makarena_action', function(e) {
         if (!e || !e.detail) return;
         const action = e.detail.action;
+        sendLog('action_event_received', { action: action, detail: e.detail });
 
         if (action === 'enable' || action === 'analyze') {
             disablePanicMode();
-            // Reset signature to force re-analysis of current question
             currentQuestionSignature = '';
             lastResolvedIndices = [];
             lastResolvedOpenAnswer = '';
             revertModifications();
-            // Delay to let Vue/Angular finish any pending renders
             setTimeout(checkAndAutoAnalyzeNewQuestion, 300);
         } else if (action === 'disable' || action === 'panic') {
             enablePanicMode();
         } else if (action === 'applyClosed') {
             if (isPanicMode || !window.__makarena_ai_active) return;
             const raw = e.detail.correctIndices;
-            // SAFETY: only apply if we actually got a non-empty array
             if (!Array.isArray(raw) || raw.length === 0) return;
             applyClosedHint(raw);
         } else if (action === 'applyOpen') {
@@ -609,7 +640,7 @@
         }
     });
 
-    // Initial trigger on page load
+    // Initial trigger
     setTimeout(function() {
         if (window.__makarena_ai_active && !isPanicMode) {
             checkAndAutoAnalyzeNewQuestion();

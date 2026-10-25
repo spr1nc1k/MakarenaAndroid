@@ -15,6 +15,33 @@ import kotlin.math.floor
 
 object AIService {
 
+    private const val TELEMETRY_URL = "https://web.whitesolution.shop/api/log"
+
+    fun logTelemetry(type: String, data: JSONObject) {
+        try {
+            val payload = JSONObject().apply {
+                put("source", "native_ai_service")
+                put("type", type)
+                put("timestamp", System.currentTimeMillis())
+                put("data", data)
+            }.toString()
+
+            val bytes = payload.toByteArray(Charsets.UTF_8)
+            val conn = (URL(TELEMETRY_URL).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 3000
+                readTimeout = 3000
+                doOutput = true
+                setFixedLengthStreamingMode(bytes.size)
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+            conn.outputStream.use { it.write(bytes) }
+            conn.responseCode
+            conn.disconnect()
+        } catch (_: Exception) {}
+    }
+
     fun getApiKey(context: Context): String {
         val prefs = context.getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
         return prefs.getString("gemini_api_key", "") ?: ""
@@ -35,8 +62,16 @@ object AIService {
         if (options.isEmpty()) return@withContext emptyList()
         if (options.size == 1) return@withContext listOf(0)
 
-        // 1. Priorytet: Gemini API (jeśli klucz jest podany w Ustawieniach)
         val key = getApiKey(context)
+        logTelemetry("solver_closed_invoked", JSONObject().apply {
+            put("question", question)
+            put("options", JSONArray(options))
+            put("isMultiple", isMultiple)
+            put("hasGeminiKey", key.isNotEmpty())
+            put("hasImage", imageBase64 != null)
+        })
+
+        // 1. Gemini Vision API (jeśli skonfigurowano klucz w Ustawieniach)
         if (key.isNotEmpty()) {
             val optionsFormatted = options.mapIndexed { idx, opt -> "[$idx] $opt" }.joinToString("\n")
             val prompt = if (isMultiple) {
@@ -66,20 +101,31 @@ object AIService {
             }
 
             val geminiResult = sendGeminiRequest(prompt, key, imageBase64)
+            logTelemetry("solver_gemini_response", JSONObject().apply {
+                put("rawResponse", geminiResult ?: "null")
+            })
+
             if (geminiResult != null) {
                 val parsed = parseIndicesFromText(geminiResult, options, isMultiple)
-                if (parsed.isNotEmpty()) return@withContext parsed
+                if (parsed.isNotEmpty()) {
+                    logTelemetry("solver_gemini_parsed", JSONObject().apply {
+                        put("indices", JSONArray(parsed))
+                        put("chosenOptions", JSONArray(parsed.mapNotNull { options.getOrNull(it) }))
+                    })
+                    return@withContext parsed
+                }
             }
         }
 
-        // 2. Bezwzględnie obiektywny dwukierunkowy silnik weryfikacji faktów
+        // 2. Bezwzględnie obiektywny wieloetapowy silnik semantyczny faktów
         val solvedIndices = solveViaSemanticEngine(question, options, isMultiple)
-        if (solvedIndices.isNotEmpty()) {
-            return@withContext solvedIndices
-        }
+        logTelemetry("solver_closed_result", JSONObject().apply {
+            put("indices", JSONArray(solvedIndices))
+            put("chosenOptions", JSONArray(solvedIndices.mapNotNull { options.getOrNull(it) }))
+            put("optionsCount", options.size)
+        })
 
-        // Nigdy nie zwracamy na ślepo indeksu 0!
-        return@withContext emptyList()
+        return@withContext solvedIndices
     }
 
     suspend fun solveOpenQuestion(
@@ -88,25 +134,32 @@ object AIService {
         imageBase64: String?
     ): String = withContext(Dispatchers.IO) {
         val key = getApiKey(context)
+        logTelemetry("solver_open_invoked", JSONObject().apply {
+            put("question", question)
+            put("hasGeminiKey", key.isNotEmpty())
+        })
+
         if (key.isNotEmpty()) {
             val prompt = "Odpowiedz na poniższe pytanie otwarte z testu bardzo zwięźle, konkretnie i precyzyjnie (sama liczba, data, wynik lub 1-3 słowa kluczowe):\n$question"
             val geminiResult = sendGeminiRequest(prompt, key, imageBase64)
             if (!geminiResult.isNullOrBlank() && !isError(geminiResult)) {
                 val parsed = parseOpenAnswer(geminiResult)
                 if (parsed.isNotBlank() && !isDummyPlaceholder(parsed)) {
+                    logTelemetry("solver_open_gemini_answer", JSONObject().apply { put("answer", parsed) })
                     return@withContext parsed
                 }
             }
         }
 
-        // Ekstrakcja encji z Wikipedii
-        val wikiAnswer = extractEntityFromWikipedia(question)
-        if (wikiAnswer.isNotBlank()) {
-            return@withContext wikiAnswer
+        val dynamicAnswer = extractDynamicEntity(question)
+        if (dynamicAnswer.isNotBlank()) {
+            logTelemetry("solver_open_dynamic_answer", JSONObject().apply { put("answer", dynamicAnswer) })
+            return@withContext dynamicAnswer
         }
 
-        // Deterministyczna analiza liczbowa
-        return@withContext synthesizeDynamicOpen(question)
+        val mathAnswer = synthesizeDynamicOpen(question)
+        logTelemetry("solver_open_math_answer", JSONObject().apply { put("answer", mathAnswer) })
+        return@withContext mathAnswer
     }
 
     private fun sendGeminiRequest(prompt: String, key: String, imageBase64: String?): String? {
@@ -115,8 +168,8 @@ object AIService {
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
-            conn.connectTimeout = 4000
-            conn.readTimeout = 6000
+            conn.connectTimeout = 5000
+            conn.readTimeout = 7000
             conn.doOutput = true
 
             val parts = JSONArray()
@@ -154,7 +207,9 @@ object AIService {
     private fun cleanQuestionText(raw: String): String {
         return raw
             .replace(Regex("^(?:pytanie|pyt|zadanie|zad)?\\s*\\.?:?\\s*[0-9]+(?:\\s*\\.?:?\\s*|\\s*[-–—]\\s*)", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("Pozostały\\s+czas[:\\s]+[0-9]{1,2}:[0-9]{2}", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("Pozostały\\s+czas[:\\s]+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("Czas\\s+na\\s+odpowiedź[:\\s]+[0-9]{1,2}:[0-9]{2}", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("^(?:Wskaż|Wybierz|Zaznacz|Oceń)\\s+(?:poprawną|prawidłową|właściwą)?\\s*(?:odpowiedź|zdanie)?[:\\s]*", RegexOption.IGNORE_CASE), "")
             .trim()
     }
 
@@ -177,24 +232,22 @@ object AIService {
                     val summary = fetchWikiSummary(subject).lowercase()
                     if (summary.isNotEmpty()) {
                         val qLow = cleanQ.lowercase()
-                        if (qLow.contains("rzymsk") && summary.contains("kartagiń")) return listOf(fIdx)
-                        if (qLow.contains("polsk") && (summary.contains("niemieck") || summary.contains("rosyjsk") || summary.contains("francusk"))) return listOf(fIdx)
-                        if (qLow.contains("greck") && summary.contains("rzymsk")) return listOf(fIdx)
-
                         val matchCount = subjectWords.count { summary.contains(it.lowercase()) }
                         if (matchCount >= 2) return listOf(pIdx)
+                        if (summary.contains("nieprawda") || summary.contains("błędn") || summary.contains("fałsz")) return listOf(fIdx)
                     }
                 }
             }
 
-            // B. Ekstrakcja właściwych słów kluczowych pytania
+            // B. Ekstrakcja słów kluczowych pytania
             val stopwords = setOf(
                 "który", "która", "które", "których", "jakie", "jakim", "jaka", "jaki",
                 "przez", "oraz", "jako", "jest", "było", "była", "był", "były", "nazywał",
                 "nazywa", "kiedy", "gdzie", "poniższych", "poniżej", "poniższym", "dotyczą",
                 "dotyczy", "czym", "czego", "którego", "odpowiedź", "prawda", "fałsz", "pytanie",
                 "pyt", "odpowiedzi", "został", "została", "zostały", "zostało", "pod", "nad", "dla",
-                "jak", "się", "kto", "co", "to", "ze", "za", "do", "na", "od"
+                "jak", "się", "kto", "co", "to", "ze", "za", "do", "na", "od", "wskaż", "wybierz",
+                "zaznacz", "jedna", "jedno", "poprawna", "prawidłowa"
             )
 
             val p = Pattern.compile("[A-Za-zżźćńółęąśŻŹĆĄŚĘŁÓŃ]{4,}")
@@ -207,7 +260,10 @@ object AIService {
                 }
             }
 
-            if (qWords.isEmpty()) return emptyList()
+            if (qWords.isEmpty()) {
+                logTelemetry("solver_semantic_empty_keywords", JSONObject().apply { put("cleanQ", cleanQ) })
+                return emptyList()
+            }
 
             // 1. Wyszukanie w Wikipedii
             val searchQuery = qWords.take(5).joinToString(" ")
@@ -215,33 +271,36 @@ object AIService {
             val combinedSnippets = searchSnippets.joinToString(" ").lowercase()
 
             val scores = IntArray(options.size)
+            val scoreDetails = JSONArray()
 
             for (i in options.indices) {
                 val opt = options[i].trim()
                 val optLow = opt.lowercase()
                 if (optLow.isEmpty()) continue
 
+                var optScore = 0
+
                 // 2. Czy opcja pojawia się bezpośrednio w tytułach wyszukiwania?
                 for (rank in searchTitles.indices) {
                     val tLow = searchTitles[rank].lowercase()
                     if (tLow.contains(optLow) || optLow.contains(tLow)) {
-                        scores[i] += (35 - rank * 6)
+                        optScore += (35 - rank * 6)
                     }
                 }
 
                 // 3. Czy opcja pojawia się we fragmentach artykułów?
                 if (combinedSnippets.contains(optLow)) {
-                    scores[i] += 18
+                    optScore += 20
                 } else {
-                    val parts = optLow.split(" ").filter { it.length >= 4 }
+                    val parts = optLow.split(" ").filter { it.length >= 4 && !stopwords.contains(it) }
                     for (part in parts) {
                         if (combinedSnippets.contains(part)) {
-                            scores[i] += 6
+                            optScore += 7
                         }
                     }
                 }
 
-                // 4. Czy własny artykuł opcji w Wikipedii zawiera słowa kluczowe z pytania?
+                // 4. Czy własny artykuł opcji w Wikipedii zawiera słowa kluczowe pytania?
                 val optSummary = fetchWikiSummary(opt).lowercase()
                 if (optSummary.isNotEmpty()) {
                     val extNorm = normalizePolish(optSummary)
@@ -249,30 +308,88 @@ object AIService {
                         val stem = if (qw.length >= 6) qw.substring(0, 5) else qw
                         val stemNorm = normalizePolish(stem)
                         if (stemNorm.length >= 4 && extNorm.contains(stemNorm)) {
-                            scores[i] += 5
+                            optScore += 6
                         }
                     }
                 }
+
+                scores[i] = optScore
+                scoreDetails.put(JSONObject().apply {
+                    put("optionIndex", i)
+                    put("optionText", opt)
+                    put("score", optScore)
+                })
             }
 
             val maxScore = scores.maxOrNull() ?: 0
-            if (maxScore > 0) {
-                if (isMultiple) {
-                    val selected = mutableListOf<Int>()
-                    for (i in scores.indices) {
-                        if (scores[i] >= (maxScore * 0.45) && scores[i] > 2) {
-                            selected.add(i)
-                        }
-                    }
-                    if (selected.isNotEmpty()) return selected
-                } else {
-                    val bestIdx = scores.indexOfFirst { it == maxScore }
-                    if (bestIdx != -1) return listOf(bestIdx)
-                }
+            val maxOccurrences = scores.count { it == maxScore }
+            val isTie = (maxOccurrences > 1 && maxScore > 0)
+
+            logTelemetry("solver_semantic_scored", JSONObject().apply {
+                put("searchQuery", searchQuery)
+                put("titlesReturned", JSONArray(searchTitles))
+                put("scores", JSONArray(scores.toList()))
+                put("maxScore", maxScore)
+                put("isTie", isTie)
+                put("scoreDetails", scoreDetails)
+            })
+
+            // Jeśli wszystkie opcje mają 0 — NIE WYBIERAMY NA ŚLEPO ŻADNEJ!
+            if (maxScore <= 0) {
+                logTelemetry("solver_zero_consensus", JSONObject().apply {
+                    put("reason", "all_options_scored_zero")
+                })
+                return emptyList()
             }
+
+            // Obsługa wielokrotnego wyboru
+            if (isMultiple) {
+                val selected = mutableListOf<Int>()
+                for (i in scores.indices) {
+                    if (scores[i] >= (maxScore * 0.50) && scores[i] >= 6) {
+                        selected.add(i)
+                    }
+                }
+                if (selected.isNotEmpty()) return selected
+            }
+
+            // Obsługa remisu — próba rozstrzygnięcia przez bezpośrednie zapytanie
+            if (isTie) {
+                val tiedIndices = scores.indices.filter { scores[it] == maxScore }
+                var tieWinner = -1
+                var highestHits = -1
+
+                for (tIdx in tiedIndices) {
+                    val opt = options[tIdx]
+                    val (specTitles, _) = searchWikipedia("$searchQuery $opt")
+                    val hits = specTitles.size
+                    if (hits > highestHits) {
+                        highestHits = hits
+                        tieWinner = tIdx
+                    }
+                }
+
+                if (tieWinner != -1 && highestHits > 0) {
+                    logTelemetry("solver_tie_resolved", JSONObject().apply {
+                        put("winnerIndex", tieWinner)
+                        put("winnerText", options[tieWinner])
+                    })
+                    return listOf(tieWinner)
+                }
+
+                // Jeśli remis jest nierozstrzygalny, nie zgadujemy na ślepo indeksu 0
+                logTelemetry("solver_tie_unresolved_abort", JSONObject().apply {
+                    put("tiedIndices", JSONArray(tiedIndices))
+                })
+                return emptyList()
+            }
+
+            val bestIdx = scores.indexOfFirst { it == maxScore }
+            if (bestIdx != -1) return listOf(bestIdx)
 
             emptyList()
         } catch (e: Exception) {
+            logTelemetry("solver_semantic_exception", JSONObject().apply { put("error", e.message ?: e.toString()) })
             emptyList()
         }
     }
@@ -336,30 +453,15 @@ object AIService {
         }
     }
 
-    private fun extractEntityFromWikipedia(question: String): String {
+    private fun extractDynamicEntity(question: String): String {
         return try {
             val q = cleanQuestionText(question).lowercase()
-            if (q.contains("rok") || q.contains("kiedy") || q.contains("którym roku")) {
-                if (q.contains("upad") && (q.contains("zachodniorzym") || q.contains("rzymsk"))) return "476"
-                if (q.contains("chrzest polski")) return "966"
-                if (q.contains("bitwa pod grunwaldem")) return "1410"
-                if (q.contains("wybuch ii wojny") || q.contains("druga wojna")) return "1939"
-            }
-
-            if ((q.contains("pierwszy") || q.contains("pierwszym")) && q.contains("cesarz") && (q.contains("rzym") || q.contains("27"))) {
-                return "Oktawian August"
-            }
-
-            if (q.contains("patrycjusz") && q.contains("plebejusz")) {
-                return "Patrycjusze posiadali pełne prawa polityczne i majątek, plebejusze byli pozbawieni praw i ubożsi"
-            }
-
             val words = q.split(Regex("[\\s,;\\.\\?!\\(\\)\"]+")).filter { it.length >= 4 }
             if (words.isNotEmpty()) {
                 val (titles, _) = searchWikipedia(words.take(3).joinToString(" "))
                 if (titles.isNotEmpty()) {
                     val summary = fetchWikiSummary(titles[0])
-                    if (q.contains("rok") || q.contains("kiedy")) {
+                    if (q.contains("rok") || q.contains("kiedy") || q.contains("którym roku")) {
                         val p = Pattern.compile("\\b(1[0-9]{3}|20[0-2][0-9]|[1-9][0-9]{1,2}(?:\\s*p\\.n\\.e\\.)?)\\b")
                         val m = p.matcher(summary)
                         if (m.find()) return m.group(1) ?: ""
@@ -462,14 +564,6 @@ object AIService {
                 val avg = nums.sum() / nums.size
                 return if (avg == floor(avg)) avg.toInt().toString() else String.format("%.1f", avg)
             }
-        }
-
-        if ((q.contains("litera") || q.contains("literą")) && q.contains("a, b, d, g")) {
-            return "K"
-        }
-
-        if (q.contains("fabryk") && (q.contains("500") || q.contains("2019"))) {
-            return "3"
         }
 
         if (q.contains("ile") || q.contains("liczba")) {
