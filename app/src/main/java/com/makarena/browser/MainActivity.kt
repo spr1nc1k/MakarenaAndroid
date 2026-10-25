@@ -220,8 +220,8 @@ class MainActivity : AppCompatActivity() {
     // Przechwytywanie klawiszy głośności:
     // 2x głośność w dół = WŁĄCZ / WYŁĄCZ (przełącznik permanentny)
     // 2x głośność w górę = PANIC MODE
-    override fun dispatchKeyEvent(event: KeyEvent?): Boolean {
-        if (event?.action == KeyEvent.ACTION_DOWN) {
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
             val now = System.currentTimeMillis()
             when (event.keyCode) {
                 KeyEvent.KEYCODE_VOLUME_DOWN -> {
