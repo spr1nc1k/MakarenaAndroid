@@ -8,6 +8,9 @@ import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -25,6 +28,7 @@ import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebSettingsCompat
@@ -84,8 +88,8 @@ class MainActivity : AppCompatActivity() {
 
     private var isAIActive = true
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val volumeDownTimestamps = mutableListOf<Long>()
-    private val volumeUpTimestamps = mutableListOf<Long>()
+    private var lastToggleTime = 0L
+    private var lastPanicTime = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -393,29 +397,53 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun triggerHaptic(type: String) {
+        try {
+            val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vm?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
+            if (vibrator != null && vibrator.hasVibrator()) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    when (type) {
+                        "on" -> vibrator.vibrate(VibrationEffect.createOneShot(140, VibrationEffect.DEFAULT_AMPLITUDE))
+                        "off" -> {
+                            val pattern = longArrayOf(0, 50, 50, 50)
+                            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
+                        }
+                        "panic" -> vibrator.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE))
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(140)
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         sendNativeLog("native_key_event", JSONObject().apply {
             put("keyCode", event.keyCode)
             put("action", event.action)
+            put("repeatCount", event.repeatCount)
         })
 
-        if (event.action == KeyEvent.ACTION_DOWN) {
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
             val now = System.currentTimeMillis()
             when (event.keyCode) {
                 KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                    volumeDownTimestamps.add(now)
-                    volumeDownTimestamps.removeAll { now - it > 800 }
-                    if (volumeDownTimestamps.size >= 2) {
-                        volumeDownTimestamps.clear()
+                    if (now - lastToggleTime > 350) {
+                        lastToggleTime = now
                         toggleAIAssistant()
                     }
                     return true
                 }
                 KeyEvent.KEYCODE_VOLUME_UP -> {
-                    volumeUpTimestamps.add(now)
-                    volumeUpTimestamps.removeAll { now - it > 800 }
-                    if (volumeUpTimestamps.size >= 2) {
-                        volumeUpTimestamps.clear()
+                    if (now - lastPanicTime > 350) {
+                        lastPanicTime = now
                         triggerPanicMode()
                     }
                     return true
@@ -429,6 +457,14 @@ class MainActivity : AppCompatActivity() {
         isAIActive = !isAIActive
         val prefs = getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("is_ai_active", isAIActive).apply()
+
+        triggerHaptic(if (isAIActive) "on" else "off")
+        Toast.makeText(
+            this,
+            if (isAIActive) "I GOT U DAWG (AI ON)" else "AI OFF",
+            Toast.LENGTH_SHORT
+        ).show()
+
         updateStatusPill(true)
 
         sendNativeLog("native_ai_toggle", JSONObject().apply {
@@ -449,6 +485,10 @@ class MainActivity : AppCompatActivity() {
         isAIActive = false
         val prefs = getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("is_ai_active", false).apply()
+
+        triggerHaptic("panic")
+        Toast.makeText(this, "PANIC MODE (ALL OFF)", Toast.LENGTH_SHORT).show()
+
         updateStatusPill(true)
 
         sendNativeLog("native_panic_mode", JSONObject().apply {
@@ -473,7 +513,7 @@ class MainActivity : AppCompatActivity() {
                         statusPill.visibility = View.INVISIBLE
                     }.start()
                 }
-            }, 2500)
+            }, 3000)
         } else {
             statusPill.animate().alpha(0f).setDuration(250).withEndAction {
                 statusPill.visibility = View.INVISIBLE

@@ -72,7 +72,7 @@ object AIService {
             put("hasImage", imageBase64 != null)
         })
 
-        // 1. Gemini Vision API (jeśli klucz jest ustawiony)
+        // 1. Gemini Vision API (jeśli klucz jest skonfigurowany)
         if (key.isNotEmpty()) {
             val optionsFormatted = options.mapIndexed { idx, opt -> "[$idx] $opt" }.joinToString("\n")
             val prompt = if (isMultiple) {
@@ -265,13 +265,13 @@ object AIService {
                 return emptyList()
             }
 
-            // 1. Wyszukanie w Wikipedii — zapytanie z najważniejszych 4 słów
-            val searchQuery = qWords.take(4).joinToString(" ")
+            // 1. Wyszukanie w Wikipedii
+            val searchQuery = qWords.take(3).joinToString(" ")
             val (searchTitles, searchSnippets) = searchWikipedia(searchQuery)
 
-            // 2. Pobranie pełnego artykułu dla pierwszych 2 trafień z Wikipedii
+            // 2. Pobranie pełnego artykułu dla pierwszych 3 trafień
             val articleTexts = StringBuilder()
-            for (title in searchTitles.take(2)) {
+            for (title in searchTitles.take(3)) {
                 val art = fetchWikiExtract(title)
                 if (art.isNotEmpty()) {
                     articleTexts.append(" ").append(art)
@@ -298,14 +298,24 @@ object AIService {
                     }
                 }
 
-                // B. Czy opcja lub jej słowa kluczowe pojawiają się w tekście wiedzy?
-                if (combinedKnowledge.contains(optLow)) {
-                    optScore += 30
-                } else {
+                // B. Rozszerzenie wieków i cyfr rzymskich
+                val expandedVariants = expandVariants(optLow)
+
+                // C. Czy opcja lub jej warianty pojawiają się w tekście wiedzy?
+                var directHit = false
+                for (variant in expandedVariants) {
+                    if (combinedKnowledge.contains(variant)) {
+                        optScore += 35
+                        directHit = true
+                        break
+                    }
+                }
+
+                if (!directHit) {
                     val parts = optLow.split(" ").filter { it.length >= 4 && !stopwords.contains(it) }
                     for (part in parts) {
                         if (combinedKnowledge.contains(part)) {
-                            optScore += 8
+                            optScore += 10
                         }
                     }
                 }
@@ -388,6 +398,21 @@ object AIService {
             logTelemetry("solver_semantic_exception", JSONObject().apply { put("error", e.message ?: e.toString()) })
             emptyList()
         }
+    }
+
+    private fun expandVariants(opt: String): List<String> {
+        val list = mutableListOf(opt)
+        val m = Pattern.compile("^(i{1,3}|iv|v|vi{1,3}|ix|x|xi{1,3}|xiv|xv|xvi{1,3}|xix|xx|xxi)\\s*w(?:\\.|\\s*n\\.e\\.|iek)?").matcher(opt)
+        if (m.find()) {
+            val roman = m.group(1) ?: ""
+            list.add("$roman w.")
+            list.add("$roman w")
+            list.add("$roman wiek")
+            list.add("$roman wieku")
+            list.add("$roman w. n.e.")
+            list.add("$roman wieku n.e.")
+        }
+        return list
     }
 
     private fun searchWikipedia(query: String): Pair<List<String>, List<String>> {
