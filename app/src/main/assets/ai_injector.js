@@ -7,14 +7,7 @@
 (function() {
     'use strict';
 
-    // Domyślnie wyłączone, chyba że użytkownik wcześniej włączył asystenta (zapamiętane w sessionStorage)
-    let isPanicMode = true;
-    try {
-        const savedState = sessionStorage.getItem('makarena_active');
-        if (savedState === '1') {
-            isPanicMode = false;
-        }
-    } catch(e) {}
+    let isPanicMode = false;
 
     let isProcessing = false;
     let currentQuestionText = '';
@@ -481,7 +474,6 @@
         const action = e.detail.action;
 
         if (action === 'analyze') {
-            try { sessionStorage.setItem('makarena_active', '1'); } catch(err) {}
             disablePanicMode();
             currentQuestionText = '';
             const data = extractQuestionData();
@@ -499,7 +491,6 @@
             if (isPanicMode) return;
             applyOpenHint(e.detail.answerText);
         } else if (action === 'panic') {
-            try { sessionStorage.setItem('makarena_active', '0'); } catch(err) {}
             enablePanicMode();
         }
     });

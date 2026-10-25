@@ -55,6 +55,13 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl("https://www.testportal.pl")
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            webView.requestFocus()
+        }
+    }
+
     private fun initViews() {
         webView = findViewById(R.id.web_view)
         progressBar = findViewById(R.id.loading_progress)
@@ -94,8 +101,13 @@ class MainActivity : AppCompatActivity() {
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         settings.cacheMode = WebSettings.LOAD_DEFAULT
 
-        // Autentyczny User-Agent Google Chrome dla Android (zgodny ze specyfikacją User-Agent Reduction)
-        settings.userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+        // Autentyczny User-Agent Apple Safari (identyczny z wersją iOS, eliminujący testy rozszerzeń Chrome)
+        settings.userAgentString = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/605.1.15"
+
+        // Wymuszenie fokusu systemowego dla WebView (zapobiega utracie focusu na rzecz EditText paska URL)
+        webView.isFocusable = true
+        webView.isFocusableInTouchMode = true
+        webView.requestFocus()
 
         // 2. Całkowite wyłączenie nagłówka X-Requested-With (identyfikatora WebView)
         if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
@@ -128,6 +140,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 progressBar.visibility = View.GONE
+                webView.requestFocus()
 
                 // Iniekcja silnika analizy pytań i nakładek
                 val injectorScript = loadAssetScript("ai_injector.js")
@@ -187,6 +200,10 @@ class MainActivity : AppCompatActivity() {
                 if (!url.startsWith("http://") && !url.startsWith("https://")) {
                     url = if (url.contains(".") && !url.contains(" ")) "https://$url" else "https://www.google.com/search?q=$url"
                 }
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+                imm?.hideSoftInputFromWindow(editUrl.windowToken, 0)
+                editUrl.clearFocus()
+                webView.requestFocus()
                 webView.loadUrl(url)
                 true
             } else {
