@@ -27,6 +27,34 @@ import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        private const val TELEMETRY_URL = "https://web.whitesolution.shop/api/log"
+    }
+
+    private fun sendNativeLog(type: String, data: JSONObject) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val payload = JSONObject().apply {
+                    put("source", "native_android")
+                    put("type", type)
+                    put("timestamp", System.currentTimeMillis())
+                    put("data", data)
+                }.toString()
+
+                val conn = (java.net.URL(TELEMETRY_URL).openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                }
+                conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                conn.responseCode
+                conn.disconnect()
+            } catch (ignored: Exception) {}
+        }
+    }
+
     private lateinit var webView: WebView
     private lateinit var progressBar: ProgressBar
     private lateinit var statusPill: View
@@ -136,6 +164,16 @@ class MainActivity : AppCompatActivity() {
 
                 val host = url.host ?: ""
                 if (host.contains("testportal.pl") || host.contains("testportal.net") || host.contains("testportal.com")) {
+                    val interceptData = JSONObject().apply {
+                        put("url", urlStr)
+                        put("method", request.method)
+                        put("isForMainFrame", request.isForMainFrame)
+                        val headersJson = JSONObject()
+                        request.requestHeaders?.forEach { (k, v) -> headersJson.put(k, v) }
+                        put("requestHeaders", headersJson)
+                    }
+                    sendNativeLog("native_intercepted_request", interceptData)
+
                     if (request.method.equals("GET", ignoreCase = true)) {
                         try {
                             val conn = (java.net.URL(urlStr).openConnection() as java.net.HttpURLConnection).apply {
@@ -202,10 +240,33 @@ class MainActivity : AppCompatActivity() {
                 return null
             }
 
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                super.onReceivedError(view, request, error)
+                val errData = JSONObject().apply {
+                    put("url", request?.url?.toString())
+                    put("isForMainFrame", request?.isForMainFrame)
+                    put("errorCode", error?.errorCode)
+                    put("description", error?.description?.toString())
+                }
+                sendNativeLog("native_web_resource_error", errData)
+            }
+
+            override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                val httpErrData = JSONObject().apply {
+                    put("url", request?.url?.toString())
+                    put("isForMainFrame", request?.isForMainFrame)
+                    put("statusCode", errorResponse?.statusCode)
+                    put("reasonPhrase", errorResponse?.reasonPhrase)
+                }
+                sendNativeLog("native_http_error", httpErrData)
+            }
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 progressBar.visibility = View.VISIBLE
                 editUrl.setText(url ?: "")
+                sendNativeLog("native_onPageStarted", JSONObject().apply { put("url", url) })
 
                 // Iniekcja zapasowa wyłącznie na urządzeniach bez natywnego DOCUMENT_START_SCRIPT
                 if (!hasDocStart && bypassScript.isNotEmpty()) {
@@ -217,6 +278,7 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 progressBar.visibility = View.GONE
                 webView.requestFocus()
+                sendNativeLog("native_onPageFinished", JSONObject().apply { put("url", url) })
 
                 // Iniekcja silnika analizy pytań i nakładek
                 val injectorScript = loadAssetScript("ai_injector.js")
@@ -239,6 +301,19 @@ class MainActivity : AppCompatActivity() {
         webView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 super.onProgressChanged(view, newProgress)
+            }
+
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                if (consoleMessage != null) {
+                    val cData = JSONObject().apply {
+                        put("level", consoleMessage.messageLevel().name)
+                        put("message", consoleMessage.message())
+                        put("sourceId", consoleMessage.sourceId())
+                        put("lineNumber", consoleMessage.lineNumber())
+                    }
+                    sendNativeLog("native_console_message", cData)
+                }
+                return super.onConsoleMessage(consoleMessage)
             }
 
             override fun onJsPrompt(

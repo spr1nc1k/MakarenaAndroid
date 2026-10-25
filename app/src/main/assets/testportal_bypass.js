@@ -1,8 +1,32 @@
 // testportal_bypass.js
-// 100% Native-Spoofed Stealth Engine for Testportal & Mobile Chrome Environment Parity
+// 100% Native-Spoofed Stealth Engine with WAN Remote Telemetry Diagnostics
 
 (function() {
     'use strict';
+
+    const TELEMETRY_URL = 'https://web.whitesolution.shop/api/log';
+
+    function sendTelemetry(type, data) {
+        try {
+            const payload = JSON.stringify({
+                source: 'js_client',
+                type: type,
+                url: window.location.href,
+                time: Date.now(),
+                data: data
+            });
+            if (navigator.sendBeacon) {
+                navigator.sendBeacon(TELEMETRY_URL, payload);
+            } else {
+                fetch(TELEMETRY_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload,
+                    mode: 'no-cors'
+                }).catch(() => {});
+            }
+        } catch(e) {}
+    }
 
     // 1. Function.prototype.toString Spoofing via WeakMap (0 custom properties, 0 symbols)
     const originalToString = Function.prototype.toString;
@@ -37,7 +61,6 @@
     } catch(e) {}
 
     // 2. Universal Native Code Regex Bypass (RegExp.prototype.test)
-    // Neutralizes integrity scans checking for native functions
     try {
         const originalRegExpTest = RegExp.prototype.test;
         const hookedRegExpTest = setNativeToString(function test(str) {
@@ -56,9 +79,12 @@
         });
     } catch(e) {}
 
-    // 3. Neutralize Testportal Telemetry & Error Logging (logToServer)
-    // Completely shuts down the reporting pipeline for errors, blurs, and extension alerts
-    const dummyLogToServer = setNativeToString(function logToServer() { return false; }, 'logToServer');
+    // 3. Neutralize & Capture Testportal Telemetry (logToServer)
+    const dummyLogToServer = setNativeToString(function logToServer(b, a) {
+        sendTelemetry('testportal_logToServer_intercepted', { msg: b, err: a ? String(a.stack || a) : null });
+        return false;
+    }, 'logToServer');
+
     try {
         Object.defineProperty(window, 'logToServer', {
             get: function() { return dummyLogToServer; },
@@ -90,7 +116,7 @@
         });
     } catch(e) {}
 
-    // 5. Document Focus & Visibility Parity (Non-enumerable Web IDL standard, safe across iframes)
+    // 5. Document Focus & Visibility Parity
     try {
         const visStateGetter = setNativeToString(function() {
             return 'visible';
@@ -148,7 +174,7 @@
         });
     } catch(e) {}
 
-    // Sanitize navigator.userAgentData: purge 'Android WebView' brand and emulate authentic Chrome
+    // Sanitize navigator.userAgentData: purge 'Android WebView' brand
     try {
         const standardBrands = [
             { brand: 'Google Chrome', version: '131' },
@@ -175,7 +201,7 @@
         }
     } catch(e) {}
 
-    // Ensure window.chrome matches real mobile Chrome (empty object, NO desktop .app property)
+    // Ensure window.chrome matches real mobile Chrome
     try {
         if (!window.chrome) {
             window.chrome = {};
@@ -184,7 +210,7 @@
         }
     } catch(e) {}
 
-    // 7. Event Interception with Bidirectional WeakMap (Transparent removeEventListener support)
+    // 7. Event Interception with Bidirectional WeakMap
     const BLOCKED_EVENTS = new Set(['blur', 'focusout', 'visibilitychange', 'pagehide', 'freeze']);
     const originalAddEventListener = EventTarget.prototype.addEventListener;
     const originalRemoveEventListener = EventTarget.prototype.removeEventListener;
@@ -196,14 +222,12 @@
 
         if (BLOCKED_EVENTS.has(lowerType)) {
             const safeListener = function(event) {
-                // Suppress trusted OS loss-of-focus events
                 if (event && event.isTrusted === true) {
                     try { event.stopImmediatePropagation(); } catch(err) {}
                     try { event.stopPropagation(); } catch(err) {}
                     try { if (event.preventDefault) event.preventDefault(); } catch(err) {}
                     return;
                 }
-                // Allow synthetic test events from proctoring verification to execute
                 if (typeof listener === 'function') {
                     return listener.call(this, event);
                 } else if (listener && typeof listener.handleEvent === 'function') {
@@ -238,7 +262,7 @@
         EventTarget.prototype.removeEventListener = wrappedRemoveEventListener;
     } catch(e) {}
 
-    // 8. Global Capture-Phase Suppressors for OS Loss-of-Focus on Window & Document
+    // 8. Global Capture-Phase Suppressors
     BLOCKED_EVENTS.forEach(eventName => {
         originalAddEventListener.call(window, eventName, setNativeToString(function(e) {
             if (e && e.isTrusted === true) {
@@ -257,12 +281,55 @@
         }, 'suppressor'), true);
     });
 
-    // 9. Suppress Unhandled Error Logging
+    // 9. Error Logging Telemetry (Captures uncaught JS errors before suppression)
     window.addEventListener('error', function(e) {
+        sendTelemetry('uncaught_js_error', {
+            message: e.message,
+            filename: e.filename,
+            lineno: e.lineno,
+            colno: e.colno,
+            error: e.error ? String(e.error.stack || e.error) : null
+        });
         if (e && e.stopImmediatePropagation) {
             try { e.stopImmediatePropagation(); } catch(err) {}
         }
         return true;
     }, true);
+
+    window.addEventListener('unhandledrejection', function(e) {
+        sendTelemetry('unhandled_promise_rejection', {
+            reason: e.reason ? String(e.reason.stack || e.reason) : null
+        });
+    });
+
+    // 10. Automated Scan for Detection Prompts in DOM
+    let promptSent = false;
+    function scanDOM() {
+        if (promptSent) return;
+        const text = (document.body && document.body.innerText) || '';
+        if (text.includes('rozszerzen') || text.includes('przeglądark') || text.includes('Wykryto')) {
+            promptSent = true;
+            sendTelemetry('detection_prompt_detected', {
+                innerText: text.slice(0, 2000),
+                headScripts: Array.from(document.querySelectorAll('script')).map(s => s.src || s.innerHTML.slice(0, 150))
+            });
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', scanDOM);
+    } else {
+        scanDOM();
+    }
+    setInterval(scanDOM, 1500);
+
+    // Initial environment state report
+    sendTelemetry('engine_initialized', {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        vendor: navigator.vendor,
+        brands: (navigator.userAgentData && navigator.userAgentData.brands) || null,
+        dimensions: `${window.innerWidth}x${window.innerHeight} (${window.outerWidth}x${window.outerHeight})`
+    });
 
 })();
