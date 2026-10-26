@@ -40,7 +40,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Klucz Gemini 2.0 Flash Vision (Zalecany)"
+                android:text="Klucze Gemini API (Obsługa Rotacji)"
                 android:textColor="@color/text_white"
                 android:textSize="14sp"
                 android:textStyle="bold" />
@@ -49,21 +49,24 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:text="Daje bezpłatne widzenie wykresów, tabel i wzorców graficznych z 0ms opóźnienia i brakiem limitów 30s."
+                android:text="Wklej 1 lub kilka kluczy (oddzielonych przecinkiem lub spacją). Aplikacja automatycznie rotuje kluczami i modelami (Gemini 2.0 / 1.5)."
                 android:textColor="@color/text_muted"
                 android:textSize="12sp" />
 
             <EditText
                 android:id="@+id/edit_api_key"
                 android:layout_width="match_parent"
-                android:layout_height="48dp"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
                 android:layout_marginTop="14dp"
                 android:background="@drawable/bg_capsule"
                 android:fontFamily="monospace"
                 android:hint="@string/gemini_key_hint"
-                android:inputType="textPassword"
+                android:inputType="text"
                 android:paddingStart="14dp"
                 android:paddingEnd="14dp"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp"
                 android:textColor="@color/text_white"
                 android:textColorHint="@color/text_muted"
                 android:textSize="12sp" />

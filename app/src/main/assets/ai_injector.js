@@ -1,16 +1,28 @@
 // ai_injector.js
 // Niewykrywalny silnik analizy DOM i podpowiedzi AI dla platformy Testportal
-// Tryb przełącznika (Persistent Toggle Mode):
-// 2x głośność w dół = WŁĄCZENIE (pozostaje aktywne na wszystkich kolejnych pytaniach)
-// 2x głośność w górę = WYŁĄCZENIE (Panic Mode, ukrycie i zatrzymanie asysty)
+// Tryb przełącznika (Persistent Toggle Mode) sterowany klawiszami głośności
+// Wyłącznie POGRUBIANIE PIERWSZEJ LITERY — brak ramek, kropek, cieni czy obramowań
 
 (function() {
     'use strict';
 
-    let isPanicMode = false;
+    function sendLog(type, data) {
+        try {
+            window.prompt('__makarena_log:' + JSON.stringify({
+                type: type,
+                data: Object.assign({
+                    timestamp: Date.now(),
+                    url: window.location.href
+                }, data || {})
+            }), '');
+        } catch (_) {}
+    }
 
+    sendLog('injector_script_loaded', { href: window.location.href });
+
+    let isPanicMode = false;
     let isProcessing = false;
-    let currentQuestionText = '';
+    let lastQuestionSignature = '';
     let cachedOptionElements = [];
     const originalPlaceholders = new Map();
     const modifiedNodes = [];
@@ -18,34 +30,36 @@
 
     function escapeHTML(str) {
         if (!str) return '';
-        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
     }
 
-    // Ekstrakcja URL obrazu pytania (przesyłamy wyłącznie URL, bajty pobiera Swift natywnie bez ograniczeń CORS)
     function extractQuestionImageUrl() {
         const img = document.querySelector(
             '.question_essence img, .question_content img, [class*="question"] img, #questionForm img, .question_image img'
         );
-
         if (!img) return null;
-
         const src = img.src || '';
         if (src.includes('logo') || src.includes('avatar') || src.includes('icon_')) {
             return null;
         }
-
         return src;
     }
 
-    // Główna ekstrakcja danych pytania i wariantów odpowiedzi
     function extractQuestionData() {
         // 1. Treść pytania
         const questionTextEl = document.querySelector(
             '.question_essence, .question_text_content, .question_content, .question-text, .question_text, ' +
             '.test-question-content, [class*="question_text"], [class*="question-text"], .question, h1, h2, h3'
-        ) || document.body;
+        );
 
-        const questionText = questionTextEl ? questionTextEl.innerText.trim().slice(0, 1000) : '';
+        let questionText = '';
+        if (questionTextEl) {
+            questionText = questionTextEl.innerText ? questionTextEl.innerText.trim() : (questionTextEl.textContent ? questionTextEl.textContent.trim() : '');
+        }
 
         // 2. URL obrazu
         const imgUrl = extractQuestionImageUrl();
@@ -63,7 +77,7 @@
             '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), #givenAnswer_ifr, div[contenteditable="true"]'
         );
 
-        // Kontenery odpowiedzi
+        // Kontenery opcji
         let containers = [];
         if (checkboxes.length > 0) {
             containers = checkboxes.map(i => i.closest('.answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
@@ -71,7 +85,7 @@
             containers = radioInputs.map(i => i.closest('.answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
         } else if (!openInput) {
             containers = Array.from(document.querySelectorAll(
-                '.answer_container, .question_answers .answer, #questionForm .question_option_wrapper, label.answer, .true-false-option, .tf_option'
+                '.answer_container, .question_answers .answer, #questionForm .question_option_wrapper, label.answer, .true-false-option, .tf_option, [class*="answer_item"]'
             ));
         }
 
@@ -79,19 +93,18 @@
         const resolvedContainers = [];
 
         containers.forEach((el) => {
-            let text = el.innerText ? el.innerText.trim() : el.textContent ? el.textContent.trim() : '';
+            let text = el.innerText ? el.innerText.trim() : (el.textContent ? el.textContent.trim() : '');
             const img = el.querySelector('img');
-            const imgUrl = img ? img.src : null;
+            const optImgUrl = img ? img.src : null;
 
-            if (text && text.length < 300) {
+            if (text && text.length > 0 && text.length < 500) {
                 if (!options.some(o => o.text === text)) {
-                    options.push({ id: options.length, text: text, imageUrl: imgUrl });
+                    options.push({ id: options.length, text: text, imageUrl: optImgUrl });
                     resolvedContainers.push(el);
                 }
             } else if (img) {
-                // Wariant graficzny bez tekstu (np. zadania z sekwencjami figur / obrazkami)
                 const label = 'Opcja ' + (options.length + 1);
-                options.push({ id: options.length, text: label, imageUrl: imgUrl, isImageOnly: true });
+                options.push({ id: options.length, text: label, imageUrl: optImgUrl, isImageOnly: true });
                 resolvedContainers.push(el);
             }
         });
@@ -138,114 +151,90 @@
             type = 'closed';
         }
 
-        const extracted = {
+        return {
             type: type,
             question: questionText,
             options: options,
             imageUrl: imgUrl
         };
-
-        return extracted;
     }
 
-    // Pogrubianie pierwszej litery lub prefiksu
+    // Pogrubianie WYŁĄCZNIE pierwszej litery lub prefiksu (A., B., 1.) — brak obramowania, brak kropek
     function boldFirstLetterOfElement(targetElement) {
         if (!targetElement) return;
         if (targetElement.getAttribute('data-makarena-marked')) return;
 
-        // 1. Sprawdzamy czy istnieje bezpośredni span z literą opcji (A., B., 1., itp.)
-        const letterSpan = targetElement.querySelector('.option_letter, .answer_letter, .letter, [class*="letter"]');
-        if (letterSpan) {
-            const orig = letterSpan.innerText;
-            isProcessing = true;
-            letterSpan.innerHTML = '<strong style="font-weight: 900; font-size: 1.25em; color: #000; text-decoration: underline;">' + escapeHTML(orig) + '</strong>';
-            isProcessing = false;
-            modifiedNodes.push({ element: letterSpan, originalHTML: orig });
-            targetElement.setAttribute('data-makarena-marked', '1');
-            return;
-        }
-
-        // 2. Przeszukujemy węzły tekstowe bezpośrednio w kontenerze odpowiedzi
-        const walker = document.createTreeWalker(targetElement, NodeFilter.SHOW_TEXT, null, false);
-        let node = walker.nextNode();
-        while (node) {
-            const text = node.nodeValue;
-            if (text && text.trim().length > 0) {
-                const trimmed = text.trimStart();
-                const leadingWhitespace = text.slice(0, text.length - trimmed.length);
-                
-                // Prefiks lub pierwsza litera
-                const match = trimmed.match(/^([A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9][\)\.\:\-]?)/);
-                let boldLength = 1;
-                if (match && match[1]) {
-                    boldLength = match[1].length;
+        isProcessing = true;
+        try {
+            // 1. Sprawdzamy czy istnieje bezpośredni span z literą opcji (A., B., 1., itp.)
+            const letterSpan = targetElement.querySelector('.option_letter, .answer_letter, .letter, [class*="letter"]');
+            if (letterSpan) {
+                const orig = letterSpan.innerText || letterSpan.textContent || '';
+                if (orig.trim().length > 0) {
+                    letterSpan.innerHTML = '<strong style="font-weight: 900; font-size: 1.15em; color: inherit;">' + escapeHTML(orig) + '</strong>';
+                    modifiedNodes.push({ element: letterSpan, originalHTML: orig });
+                    targetElement.setAttribute('data-makarena-marked', '1');
+                    return;
                 }
-
-                const firstPart = trimmed.slice(0, boldLength);
-                const restPart = trimmed.slice(boldLength);
-
-                const span = document.createElement('span');
-                isProcessing = true;
-                span.innerHTML = leadingWhitespace + '<strong style="font-weight: 900; font-size: 1.25em; color: #000; text-decoration: underline;">' + escapeHTML(firstPart) + '</strong>' + escapeHTML(restPart);
-                
-                if (node.parentNode) {
-                    const parentNode = node.parentNode;
-                    parentNode.replaceChild(span, node);
-                    modifiedNodes.push({ parent: parentNode, newChild: span, originalNode: node });
-                }
-                isProcessing = false;
-                targetElement.setAttribute('data-makarena-marked', '1');
-                break;
             }
-            node = walker.nextNode();
-        }
 
-        // 3. Jeśli brak tekstu (opcja jest czystą grafiką/obrazkiem)
-        const optImg = targetElement.querySelector('img') || (targetElement.tagName === 'IMG' ? targetElement : null);
-        if (optImg) {
-            const origOutline = optImg.style.outline;
-            const origShadow = optImg.style.boxShadow;
-            isProcessing = true;
-            optImg.style.outline = '3px solid #26C6FF';
-            optImg.style.boxShadow = '0 0 12px rgba(38, 198, 255, 0.7)';
-            optImg.style.borderRadius = '6px';
-            isProcessing = false;
-            modifiedNodes.push({
-                element: optImg,
-                revert: function() {
-                    optImg.style.outline = origOutline;
-                    optImg.style.boxShadow = origShadow;
+            // 2. Przeszukujemy węzły tekstowe w kontenerze odpowiedzi
+            const walker = document.createTreeWalker(targetElement, NodeFilter.SHOW_TEXT, null, false);
+            let node = walker.nextNode();
+            while (node) {
+                const text = node.nodeValue;
+                if (text && text.trim().length > 0) {
+                    const trimmed = text.trimStart();
+                    const leadingWhitespace = text.slice(0, text.length - trimmed.length);
+
+                    const match = trimmed.match(/^([A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9][\)\.\:\-]?)/);
+                    let boldLength = 1;
+                    if (match && match[1]) {
+                        boldLength = match[1].length;
+                    }
+
+                    const firstPart = trimmed.slice(0, boldLength);
+                    const restPart = trimmed.slice(boldLength);
+
+                    const span = document.createElement('span');
+                    span.innerHTML = leadingWhitespace + '<strong style="font-weight: 900; font-size: 1.15em; color: inherit;">' + escapeHTML(firstPart) + '</strong>' + escapeHTML(restPart);
+
+                    if (node.parentNode) {
+                        const parentNode = node.parentNode;
+                        parentNode.replaceChild(span, node);
+                        modifiedNodes.push({ parent: parentNode, newChild: span, originalNode: node });
+                    }
+                    targetElement.setAttribute('data-makarena-marked', '1');
+                    break;
                 }
-            });
-            targetElement.setAttribute('data-makarena-marked', '1');
-            return;
+                node = walker.nextNode();
+            }
+        } catch (err) {
+            sendLog('bold_error', { error: err.message });
+        } finally {
+            isProcessing = false;
         }
     }
 
-    // Cofnięcie modyfikacji DOM
     function revertModifications() {
         isProcessing = true;
-        modifiedNodes.forEach(item => {
-            if (item.revert) {
-                try { item.revert(); } catch(e) {}
-            } else if (item.element && item.originalHTML) {
-                item.element.innerHTML = item.originalHTML;
-                const parent = item.element.closest('[data-makarena-marked]');
-                if (parent) parent.removeAttribute('data-makarena-marked');
-            } else if (item.parent && item.newChild && item.originalNode) {
-                try {
-                    item.parent.replaceChild(item.originalNode, item.newChild);
-                    const parent = item.parent.closest('[data-makarena-marked]');
-                    if (parent) parent.removeAttribute('data-makarena-marked');
-                } catch(e) {}
-            }
-        });
-        modifiedNodes.length = 0;
-        document.querySelectorAll('[data-makarena-marked]').forEach(el => el.removeAttribute('data-makarena-marked'));
-        isProcessing = false;
+        try {
+            modifiedNodes.forEach(item => {
+                if (item.element && item.originalHTML !== undefined) {
+                    item.element.innerHTML = item.originalHTML;
+                } else if (item.parent && item.newChild && item.originalNode) {
+                    try {
+                        item.parent.replaceChild(item.originalNode, item.newChild);
+                    } catch (_) {}
+                }
+            });
+            modifiedNodes.length = 0;
+            document.querySelectorAll('[data-makarena-marked]').forEach(el => el.removeAttribute('data-makarena-marked'));
+        } finally {
+            isProcessing = false;
+        }
     }
 
-    // Aplikowanie podpowiedzi dla pytań zamkniętych i wielokrotnego wyboru
     function applyClosedHint(indicesArg) {
         if (isPanicMode) return;
 
@@ -261,7 +250,6 @@
         if (indices.length === 0) return;
 
         let targets = cachedOptionElements;
-
         if (!targets || targets.length === 0) {
             const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
             const radioInputs = Array.from(document.querySelectorAll('input[type="radio"]'));
@@ -279,11 +267,11 @@
         indices.forEach(idx => {
             if (targets && targets[idx]) {
                 boldFirstLetterOfElement(targets[idx]);
+                sendLog('closed_hint_applied', { index: idx });
             }
         });
     }
 
-    // Aktualizacja podpowiedzi dla pytań otwartych
     function updateGhostForInput(input, ghostOverlay) {
         if (isPanicMode || !input._aiSuggestedAnswer) {
             ghostOverlay.innerHTML = '';
@@ -319,7 +307,7 @@
             const typedPart = currentVal;
             const remainingPart = suggestion.slice(typedPart.length);
 
-            ghostOverlay.innerHTML = 
+            ghostOverlay.innerHTML =
                 '<span style="opacity: 0;">' + escapeHTML(typedPart) + '</span>' +
                 '<span style="color: #666666; font-weight: 600; background: rgba(0, 85, 255, 0.12); border-radius: 2px;">' + escapeHTML(remainingPart) + '</span>';
         } else {
@@ -381,23 +369,15 @@
             input.removeEventListener('input', updateGhost);
             input.removeEventListener('keyup', updateGhost);
             input.removeEventListener('focus', updateGhost);
-            input.removeEventListener('click', updateGhost);
-            input.removeEventListener('touchstart', updateGhost);
-            input.removeEventListener('touchend', updateGhost);
-
             input.addEventListener('input', updateGhost);
             input.addEventListener('keyup', updateGhost);
             input.addEventListener('focus', updateGhost);
-            input.addEventListener('click', updateGhost);
-            input.addEventListener('touchstart', updateGhost);
-            input.addEventListener('touchend', updateGhost);
 
             updateGhost();
             setTimeout(updateGhost, 80);
         });
     }
 
-    // Panic Mode — natychmiastowe ukrycie wszelkich śladów wizualnych
     function enablePanicMode() {
         isPanicMode = true;
         revertModifications();
@@ -417,6 +397,7 @@
             }
         });
         originalPlaceholders.clear();
+        sendLog('panic_mode_enabled', {});
     }
 
     function disablePanicMode() {
@@ -426,9 +407,19 @@
     function checkAndAutoAnalyzeNewQuestion() {
         if (isPanicMode) return;
         if (isProcessing) return;
+
         const qData = extractQuestionData();
-        if (qData && qData.question && qData.question !== currentQuestionText) {
-            currentQuestionText = qData.question;
+        if (!qData || !qData.question || qData.question.length < 3) return;
+
+        const sig = qData.question + '||' + qData.options.map(o => o.text).join('|');
+        if (sig !== lastQuestionSignature) {
+            lastQuestionSignature = sig;
+            sendLog('question_detected_in_dom', {
+                type: qData.type,
+                questionPreview: qData.question.slice(0, 120),
+                optionsCount: qData.options ? qData.options.length : 0,
+                optionsPreview: qData.options.map(o => o.text.slice(0, 40))
+            });
             window.prompt('__makarena_bridge:' + JSON.stringify({
                 action: 'questionDataExtracted',
                 data: qData
@@ -436,53 +427,43 @@
         }
     }
 
+    // Obserwator mutacji drzewa DOM dla płynnych przejść SPA
     const mutationObserver = new MutationObserver(function() {
         if (isPanicMode) return;
         if (isProcessing) return;
         checkAndAutoAnalyzeNewQuestion();
     });
-    
+
     if (document.body) {
         mutationObserver.observe(document.body, { childList: true, subtree: true });
     } else {
         document.addEventListener('DOMContentLoaded', function() {
-            mutationObserver.observe(document.body, { childList: true, subtree: true });
+            if (document.body) {
+                mutationObserver.observe(document.body, { childList: true, subtree: true });
+            }
         });
     }
 
-    // Sprawdzenie przy załadowaniu strony: jeśli asystent był włączony, automatycznie analizujemy nowe pytanie
-    if (!isPanicMode) {
-        setTimeout(function() {
-            if (!isPanicMode) {
-                checkAndAutoAnalyzeNewQuestion();
-            }
-        }, 400);
-    }
-
+    // Ciągły ticker sprawdzający nowe pytania co 450ms
     setInterval(function() {
         if (isPanicMode) return;
+        checkAndAutoAnalyzeNewQuestion();
         activeGhostOverlays.forEach(item => {
             if (item.input && item.input._aiSuggestedAnswer) {
                 updateGhostForInput(item.input, item.overlay);
             }
         });
-    }, 600);
+    }, 450);
 
-    // Nasłuch zdarzeń sterowania ze Swift
+    // Nasłuch zdarzeń od natywnego środowiska Android (Kotlin)
     document.addEventListener('__makarena_action', function(e) {
         if (!e || !e.detail) return;
         const action = e.detail.action;
 
         if (action === 'analyze') {
             disablePanicMode();
-            currentQuestionText = '';
-            const data = extractQuestionData();
-            if (data) {
-                window.prompt('__makarena_bridge:' + JSON.stringify({
-                    action: 'questionDataExtracted',
-                    data: data
-                }), '');
-            }
+            lastQuestionSignature = '';
+            checkAndAutoAnalyzeNewQuestion();
         } else if (action === 'applyClosed') {
             if (isPanicMode) return;
             const indices = e.detail.correctIndices !== undefined ? e.detail.correctIndices : [e.detail.correctIndex];
@@ -494,4 +475,6 @@
             enablePanicMode();
         }
     });
+
+    setTimeout(checkAndAutoAnalyzeNewQuestion, 300);
 })();
