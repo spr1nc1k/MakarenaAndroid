@@ -134,7 +134,41 @@ object AIService {
             }
         }
 
-        // 2. Public Fallback Pool (Pollinations / Free endpoints)
+        // 2. WhiteSolution Dedicated Server Solver Relay (Clean Server IP via web.whitesolution.shop)
+        try {
+            val serverStart = System.currentTimeMillis()
+            TelemetryLogger.log("solver_api_attempt", JSONObject().apply {
+                put("provider", "whitesolution_server")
+                put("endpoint", "https://web.whitesolution.shop/api/solve")
+            })
+
+            val serverResp = sendServerSolveRequest(question, options, isMultiple)
+            val duration = System.currentTimeMillis() - serverStart
+
+            TelemetryLogger.log("solver_api_response", JSONObject().apply {
+                put("provider", "whitesolution_server")
+                put("statusCode", serverResp.statusCode)
+                put("rawResponse", serverResp.body ?: serverResp.errorMessage ?: "")
+                put("durationMs", duration)
+            })
+
+            if (serverResp.statusCode == 200 && serverResp.body != null) {
+                val sObj = JSONObject(serverResp.body)
+                val arr = sObj.optJSONArray("indices")
+                if (arr != null && arr.length() > 0) {
+                    val indices = mutableListOf<Int>()
+                    for (i in 0 until arr.length()) indices.add(arr.getInt(i))
+                    TelemetryLogger.log("solver_final_decision", JSONObject().apply {
+                        put("provider", "whitesolution_server")
+                        put("selectedIndices", JSONArray(indices))
+                        put("totalDurationMs", System.currentTimeMillis() - startTime)
+                    })
+                    return@withContext indices
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 3. Public Fallback Pool (Direct Pollinations client calls)
         val freeEndpoints = listOf(
             "https://text.pollinations.ai/" to "openai",
             "https://text.pollinations.ai/" to "openai-fast"
@@ -143,7 +177,7 @@ object AIService {
         for ((endpoint, model) in freeEndpoints) {
             val attemptStart = System.currentTimeMillis()
             TelemetryLogger.log("solver_api_attempt", JSONObject().apply {
-                put("provider", "pollinations")
+                put("provider", "pollinations_direct")
                 put("endpoint", endpoint)
                 put("model", model)
             })
@@ -152,7 +186,7 @@ object AIService {
             val duration = System.currentTimeMillis() - attemptStart
 
             TelemetryLogger.log("solver_api_response", JSONObject().apply {
-                put("provider", "pollinations")
+                put("provider", "pollinations_direct")
                 put("endpoint", endpoint)
                 put("model", model)
                 put("statusCode", resp.statusCode)
@@ -163,7 +197,7 @@ object AIService {
             if (resp.statusCode == 200 && !resp.body.isNullOrEmpty() && !isError(resp.body)) {
                 val parsed = parseIndicesFromText(resp.body, options, isMultiple)
                 TelemetryLogger.log("solver_parse_result", JSONObject().apply {
-                    put("provider", "pollinations")
+                    put("provider", "pollinations_direct")
                     put("model", model)
                     put("rawText", resp.body)
                     put("parsedIndices", JSONArray(parsed))
@@ -172,7 +206,7 @@ object AIService {
 
                 if (parsed.isNotEmpty()) {
                     TelemetryLogger.log("solver_final_decision", JSONObject().apply {
-                        put("provider", "pollinations")
+                        put("provider", "pollinations_direct")
                         put("model", model)
                         put("selectedIndices", JSONArray(parsed))
                         put("totalDurationMs", System.currentTimeMillis() - startTime)
@@ -182,10 +216,10 @@ object AIService {
             }
         }
 
-        // 3. Heuristic / Semantic fallback
+        // 4. Heuristic / Semantic fallback
         val fallbackIndices = fallbackSmartSolver(question, options, isMultiple)
         TelemetryLogger.log("solver_fallback_invoked", JSONObject().apply {
-            put("reason", if (keys.isEmpty()) "Brak skonfigurowanych kluczy Gemini API w Ustawieniach" else "Wszystkie klucze API wyczerpane lub zablokowane")
+            put("reason", if (keys.isEmpty()) "Brak skonfigurowanych kluczy Gemini API w Ustawieniach i failover serwera" else "Wszystkie klucze API wyczerpane lub zablokowane")
             put("selectedIndices", JSONArray(fallbackIndices))
             put("totalDurationMs", System.currentTimeMillis() - startTime)
         })
@@ -223,6 +257,23 @@ object AIService {
             }
         }
 
+        // Server open solver
+        try {
+            val serverResp = sendServerSolveOpenRequest(question)
+            if (serverResp.statusCode == 200 && serverResp.body != null) {
+                val sObj = JSONObject(serverResp.body)
+                val ans = sObj.optString("answer", "")
+                if (ans.isNotEmpty()) {
+                    TelemetryLogger.log("open_solver_decision", JSONObject().apply {
+                        put("provider", "whitesolution_server")
+                        put("answer", ans)
+                        put("durationMs", System.currentTimeMillis() - startTime)
+                    })
+                    return@withContext ans
+                }
+            }
+        } catch (_: Exception) {}
+
         val freeResp = sendPollinationsRequest("https://text.pollinations.ai/", "openai", prompt)
         if (freeResp.statusCode == 200 && !freeResp.body.isNullOrBlank() && !isError(freeResp.body)) {
             val answer = parseOpenAnswer(freeResp.body)
@@ -243,6 +294,64 @@ object AIService {
     }
 
     data class ApiResponse(val statusCode: Int, val body: String?, val errorMessage: String?)
+
+    private fun sendServerSolveRequest(question: String, options: List<String>, isMultiple: Boolean): ApiResponse {
+        return try {
+            val url = URL("https://web.whitesolution.shop/api/solve")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.connectTimeout = 12000
+            conn.readTimeout = 12000
+            conn.doOutput = true
+
+            val payload = JSONObject().apply {
+                put("question", question)
+                put("options", JSONArray(options))
+                put("isMultiple", isMultiple)
+            }
+
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
+            val code = conn.responseCode
+            if (code == 200) {
+                val resp = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                ApiResponse(code, resp, null)
+            } else {
+                val err = conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "HTTP $code"
+                ApiResponse(code, null, err)
+            }
+        } catch (e: Exception) {
+            ApiResponse(0, null, e.message ?: e.toString())
+        }
+    }
+
+    private fun sendServerSolveOpenRequest(question: String): ApiResponse {
+        return try {
+            val url = URL("https://web.whitesolution.shop/api/solve_open")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.connectTimeout = 12000
+            conn.readTimeout = 12000
+            conn.doOutput = true
+
+            val payload = JSONObject().apply {
+                put("question", question)
+            }
+
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
+            val code = conn.responseCode
+            if (code == 200) {
+                val resp = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                ApiResponse(code, resp, null)
+            } else {
+                val err = conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "HTTP $code"
+                ApiResponse(code, null, err)
+            }
+        } catch (e: Exception) {
+            ApiResponse(0, null, e.message ?: e.toString())
+        }
+    }
 
     private fun sendGeminiRequest(prompt: String, key: String, model: String, imageBase64: String?): ApiResponse {
         return try {
