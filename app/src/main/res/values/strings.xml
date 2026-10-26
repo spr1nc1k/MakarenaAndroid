@@ -4,5 +4,7 @@
     <string name="panic_mode">PANIC MODE</string>
     <string name="url_hint">Wpisz adres...</string>
     <string name="settings_title">Ustawienia Systemu</string>
-    <string name="gemini_key_hint">Wklej darmowy klucz Gemini API (AIzaSy...)</string>
+    <string name="gemini_key_hint">Klucze Gemini API (AIzaSy...)</string>
+    <string name="groq_key_hint">Klucze Groq API (gsk_...)</string>
+    <string name="openrouter_key_hint">Klucze OpenRouter API (sk-or-v1-...)</string>
 </resources>

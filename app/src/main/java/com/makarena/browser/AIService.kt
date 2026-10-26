@@ -1,5 +1,5 @@
 // Kotlin, Android, Makarena Browser
-// Production AI Solver Engine with multi-provider rotation, resilient parsing, and comprehensive telemetry
+// Production AI Solver Engine with multi-provider rotation across 100% free providers
 
 package com.makarena.browser
 
@@ -15,20 +15,25 @@ import java.util.regex.Pattern
 
 object AIService {
 
-    fun getApiKey(context: Context): String {
+    fun getGeminiKeys(context: Context): List<String> {
         val prefs = context.getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
-        return prefs.getString("gemini_api_key", "") ?: ""
-    }
-
-    fun getApiKeys(context: Context): List<String> {
-        val raw = getApiKey(context).trim()
+        val raw = prefs.getString("gemini_api_key", "") ?: ""
         if (raw.isEmpty()) return emptyList()
         return raw.split(Regex("[,;\\s\\n]+")).map { it.trim() }.filter { it.isNotEmpty() }
     }
 
-    fun setApiKey(context: Context, key: String) {
+    fun getGroqKeys(context: Context): List<String> {
         val prefs = context.getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
-        prefs.edit().putString("gemini_api_key", key).apply()
+        val raw = prefs.getString("groq_api_key", "") ?: ""
+        if (raw.isEmpty()) return emptyList()
+        return raw.split(Regex("[,;\\s\\n]+")).map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    fun getOpenRouterKeys(context: Context): List<String> {
+        val prefs = context.getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
+        val raw = prefs.getString("openrouter_api_key", "") ?: ""
+        if (raw.isEmpty()) return emptyList()
+        return raw.split(Regex("[,;\\s\\n]+")).map { it.trim() }.filter { it.isNotEmpty() }
     }
 
     suspend fun solveClosedQuestion(
@@ -41,7 +46,10 @@ object AIService {
         val startTime = System.currentTimeMillis()
         if (options.isEmpty()) return@withContext listOf(0)
 
-        val keys = getApiKeys(context)
+        val geminiKeys = getGeminiKeys(context)
+        val groqKeys = getGroqKeys(context)
+        val openRouterKeys = getOpenRouterKeys(context)
+
         val optionsFormatted = options.mapIndexed { idx, opt -> "[$idx] $opt" }.joinToString("\n")
 
         val prompt = if (isMultiple) {
@@ -79,24 +87,23 @@ object AIService {
             put("question", question)
             put("options", JSONArray(options))
             put("isMultiple", isMultiple)
-            put("keysConfigured", keys.size)
+            put("geminiKeysCount", geminiKeys.size)
+            put("groqKeysCount", groqKeys.size)
+            put("openRouterKeysCount", openRouterKeys.size)
             put("hasImage", !imageBase64.isNullOrEmpty())
         })
 
-        // 1. Try Gemini Provider Pool with configured keys
-        if (keys.isNotEmpty()) {
+        // 1. Google Gemini Provider Pool
+        if (geminiKeys.isNotEmpty()) {
             val geminiModels = listOf("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b")
-            for ((keyIndex, key) in keys.withIndex()) {
-                val keyMasked = if (key.length > 8) "${key.take(4)}...${key.takeLast(4)}" else "***"
+            for ((keyIndex, key) in geminiKeys.withIndex()) {
                 for (model in geminiModels) {
                     val attemptStart = System.currentTimeMillis()
-                    val reqData = JSONObject().apply {
+                    TelemetryLogger.log("solver_api_attempt", JSONObject().apply {
                         put("provider", "gemini")
                         put("model", model)
                         put("keyIndex", keyIndex)
-                        put("keyMasked", keyMasked)
-                    }
-                    TelemetryLogger.log("solver_api_attempt", reqData)
+                    })
 
                     val resp = sendGeminiRequest(prompt, key, model, imageBase64)
                     val duration = System.currentTimeMillis() - attemptStart
@@ -104,7 +111,6 @@ object AIService {
                     TelemetryLogger.log("solver_api_response", JSONObject().apply {
                         put("provider", "gemini")
                         put("model", model)
-                        put("keyIndex", keyIndex)
                         put("statusCode", resp.statusCode)
                         put("rawResponse", resp.body ?: resp.errorMessage ?: "")
                         put("durationMs", duration)
@@ -112,14 +118,6 @@ object AIService {
 
                     if (resp.statusCode == 200 && !resp.body.isNullOrEmpty()) {
                         val parsed = parseIndicesFromText(resp.body, options, isMultiple)
-                        TelemetryLogger.log("solver_parse_result", JSONObject().apply {
-                            put("provider", "gemini")
-                            put("model", model)
-                            put("rawText", resp.body)
-                            put("parsedIndices", JSONArray(parsed))
-                            put("success", parsed.isNotEmpty())
-                        })
-
                         if (parsed.isNotEmpty()) {
                             TelemetryLogger.log("solver_final_decision", JSONObject().apply {
                                 put("provider", "gemini")
@@ -134,7 +132,89 @@ object AIService {
             }
         }
 
-        // 2. WhiteSolution Dedicated Server Solver Relay (Clean Server IP via web.whitesolution.shop)
+        // 2. Groq Provider Pool (Ultra-fast 200ms LLaMA 3.3 70B, 30 RPM permanent free)
+        if (groqKeys.isNotEmpty()) {
+            val groqModels = listOf("llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768")
+            for ((keyIndex, key) in groqKeys.withIndex()) {
+                for (model in groqModels) {
+                    val attemptStart = System.currentTimeMillis()
+                    TelemetryLogger.log("solver_api_attempt", JSONObject().apply {
+                        put("provider", "groq")
+                        put("model", model)
+                        put("keyIndex", keyIndex)
+                    })
+
+                    val resp = sendOpenAiCompatibleRequest("https://api.groq.com/openai/v1/chat/completions", key, model, prompt)
+                    val duration = System.currentTimeMillis() - attemptStart
+
+                    TelemetryLogger.log("solver_api_response", JSONObject().apply {
+                        put("provider", "groq")
+                        put("model", model)
+                        put("statusCode", resp.statusCode)
+                        put("rawResponse", resp.body ?: resp.errorMessage ?: "")
+                        put("durationMs", duration)
+                    })
+
+                    if (resp.statusCode == 200 && !resp.body.isNullOrEmpty()) {
+                        val parsed = parseIndicesFromText(resp.body, options, isMultiple)
+                        if (parsed.isNotEmpty()) {
+                            TelemetryLogger.log("solver_final_decision", JSONObject().apply {
+                                put("provider", "groq")
+                                put("model", model)
+                                put("selectedIndices", JSONArray(parsed))
+                                put("totalDurationMs", System.currentTimeMillis() - startTime)
+                            })
+                            return@withContext parsed
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. OpenRouter Free Models Pool
+        if (openRouterKeys.isNotEmpty()) {
+            val freeModels = listOf(
+                "google/gemini-2.0-flash-exp:free",
+                "meta-llama/llama-3.3-70b-instruct:free",
+                "deepseek/deepseek-r1:free"
+            )
+            for ((keyIndex, key) in openRouterKeys.withIndex()) {
+                for (model in freeModels) {
+                    val attemptStart = System.currentTimeMillis()
+                    TelemetryLogger.log("solver_api_attempt", JSONObject().apply {
+                        put("provider", "openrouter")
+                        put("model", model)
+                        put("keyIndex", keyIndex)
+                    })
+
+                    val resp = sendOpenAiCompatibleRequest("https://openrouter.ai/api/v1/chat/completions", key, model, prompt)
+                    val duration = System.currentTimeMillis() - attemptStart
+
+                    TelemetryLogger.log("solver_api_response", JSONObject().apply {
+                        put("provider", "openrouter")
+                        put("model", model)
+                        put("statusCode", resp.statusCode)
+                        put("rawResponse", resp.body ?: resp.errorMessage ?: "")
+                        put("durationMs", duration)
+                    })
+
+                    if (resp.statusCode == 200 && !resp.body.isNullOrEmpty()) {
+                        val parsed = parseIndicesFromText(resp.body, options, isMultiple)
+                        if (parsed.isNotEmpty()) {
+                            TelemetryLogger.log("solver_final_decision", JSONObject().apply {
+                                put("provider", "openrouter")
+                                put("model", model)
+                                put("selectedIndices", JSONArray(parsed))
+                                put("totalDurationMs", System.currentTimeMillis() - startTime)
+                            })
+                            return@withContext parsed
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. WhiteSolution Server Solver Relay
         try {
             val serverStart = System.currentTimeMillis()
             TelemetryLogger.log("solver_api_attempt", JSONObject().apply {
@@ -168,46 +248,18 @@ object AIService {
             }
         } catch (_: Exception) {}
 
-        // 3. Public Fallback Pool (Direct Pollinations client calls)
+        // 5. Direct Pollinations Fallback
         val freeEndpoints = listOf(
             "https://text.pollinations.ai/" to "openai",
             "https://text.pollinations.ai/" to "openai-fast"
         )
-
         for ((endpoint, model) in freeEndpoints) {
-            val attemptStart = System.currentTimeMillis()
-            TelemetryLogger.log("solver_api_attempt", JSONObject().apply {
-                put("provider", "pollinations_direct")
-                put("endpoint", endpoint)
-                put("model", model)
-            })
-
             val resp = sendPollinationsRequest(endpoint, model, prompt)
-            val duration = System.currentTimeMillis() - attemptStart
-
-            TelemetryLogger.log("solver_api_response", JSONObject().apply {
-                put("provider", "pollinations_direct")
-                put("endpoint", endpoint)
-                put("model", model)
-                put("statusCode", resp.statusCode)
-                put("rawResponse", resp.body ?: resp.errorMessage ?: "")
-                put("durationMs", duration)
-            })
-
             if (resp.statusCode == 200 && !resp.body.isNullOrEmpty() && !isError(resp.body)) {
                 val parsed = parseIndicesFromText(resp.body, options, isMultiple)
-                TelemetryLogger.log("solver_parse_result", JSONObject().apply {
-                    put("provider", "pollinations_direct")
-                    put("model", model)
-                    put("rawText", resp.body)
-                    put("parsedIndices", JSONArray(parsed))
-                    put("success", parsed.isNotEmpty())
-                })
-
                 if (parsed.isNotEmpty()) {
                     TelemetryLogger.log("solver_final_decision", JSONObject().apply {
                         put("provider", "pollinations_direct")
-                        put("model", model)
                         put("selectedIndices", JSONArray(parsed))
                         put("totalDurationMs", System.currentTimeMillis() - startTime)
                     })
@@ -216,10 +268,10 @@ object AIService {
             }
         }
 
-        // 4. Heuristic / Semantic fallback
+        // 6. Heuristic Fallback
         val fallbackIndices = fallbackSmartSolver(question, options, isMultiple)
         TelemetryLogger.log("solver_fallback_invoked", JSONObject().apply {
-            put("reason", if (keys.isEmpty()) "Brak skonfigurowanych kluczy Gemini API w Ustawieniach i failover serwera" else "Wszystkie klucze API wyczerpane lub zablokowane")
+            put("reason", "Wszystkie zewnetrzne AI wyczerpane")
             put("selectedIndices", JSONArray(fallbackIndices))
             put("totalDurationMs", System.currentTimeMillis() - startTime)
         })
@@ -233,117 +285,79 @@ object AIService {
         imageBase64: String?
     ): String = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        val keys = getApiKeys(context)
+        val geminiKeys = getGeminiKeys(context)
+        val groqKeys = getGroqKeys(context)
         val prompt = "Odpowiedz na poniższe pytanie otwarte z testu bardzo zwięźle i precyzyjnie (sama liczba lub 1-3 konkretne słowa):\n$question"
 
-        TelemetryLogger.log("open_solver_started", JSONObject().apply {
-            put("question", question)
-            put("keysCount", keys.size)
-            put("hasImage", !imageBase64.isNullOrEmpty())
-        })
-
-        if (keys.isNotEmpty()) {
-            for ((keyIndex, key) in keys.withIndex()) {
+        if (geminiKeys.isNotEmpty()) {
+            for (key in geminiKeys) {
                 val resp = sendGeminiRequest(prompt, key, "gemini-2.0-flash", imageBase64)
                 if (resp.statusCode == 200 && !resp.body.isNullOrBlank() && !isError(resp.body)) {
-                    val answer = parseOpenAnswer(resp.body)
-                    TelemetryLogger.log("open_solver_decision", JSONObject().apply {
-                        put("provider", "gemini")
-                        put("answer", answer)
-                        put("durationMs", System.currentTimeMillis() - startTime)
-                    })
-                    return@withContext answer
+                    return@withContext parseOpenAnswer(resp.body)
                 }
             }
         }
 
-        // Server open solver
+        if (groqKeys.isNotEmpty()) {
+            for (key in groqKeys) {
+                val resp = sendOpenAiCompatibleRequest("https://api.groq.com/openai/v1/chat/completions", key, "llama-3.3-70b-versatile", prompt)
+                if (resp.statusCode == 200 && !resp.body.isNullOrBlank() && !isError(resp.body)) {
+                    return@withContext parseOpenAnswer(resp.body)
+                }
+            }
+        }
+
         try {
             val serverResp = sendServerSolveOpenRequest(question)
             if (serverResp.statusCode == 200 && serverResp.body != null) {
                 val sObj = JSONObject(serverResp.body)
                 val ans = sObj.optString("answer", "")
-                if (ans.isNotEmpty()) {
-                    TelemetryLogger.log("open_solver_decision", JSONObject().apply {
-                        put("provider", "whitesolution_server")
-                        put("answer", ans)
-                        put("durationMs", System.currentTimeMillis() - startTime)
-                    })
-                    return@withContext ans
-                }
+                if (ans.isNotEmpty()) return@withContext ans
             }
         } catch (_: Exception) {}
 
         val freeResp = sendPollinationsRequest("https://text.pollinations.ai/", "openai", prompt)
         if (freeResp.statusCode == 200 && !freeResp.body.isNullOrBlank() && !isError(freeResp.body)) {
-            val answer = parseOpenAnswer(freeResp.body)
-            TelemetryLogger.log("open_solver_decision", JSONObject().apply {
-                put("provider", "pollinations")
-                put("answer", answer)
-                put("durationMs", System.currentTimeMillis() - startTime)
-            })
-            return@withContext answer
+            return@withContext parseOpenAnswer(freeResp.body)
         }
 
         val fallback = synthesizeFallbackOpen(question)
-        TelemetryLogger.log("open_solver_fallback", JSONObject().apply {
-            put("answer", fallback)
-            put("durationMs", System.currentTimeMillis() - startTime)
-        })
         return@withContext fallback
     }
 
     data class ApiResponse(val statusCode: Int, val body: String?, val errorMessage: String?)
 
-    private fun sendServerSolveRequest(question: String, options: List<String>, isMultiple: Boolean): ApiResponse {
+    private fun sendOpenAiCompatibleRequest(endpoint: String, key: String, model: String, prompt: String): ApiResponse {
         return try {
-            val url = URL("https://web.whitesolution.shop/api/solve")
+            val url = URL(endpoint)
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
-            conn.connectTimeout = 12000
-            conn.readTimeout = 12000
+            conn.setRequestProperty("Authorization", "Bearer $key")
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
             conn.doOutput = true
 
-            val payload = JSONObject().apply {
-                put("question", question)
-                put("options", JSONArray(options))
-                put("isMultiple", isMultiple)
+            val body = JSONObject().apply {
+                put("model", model)
+                put("messages", JSONArray().put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", prompt)
+                }))
             }
 
-            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body.toString()) }
+
             val code = conn.responseCode
             if (code == 200) {
                 val resp = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                ApiResponse(code, resp, null)
-            } else {
-                val err = conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "HTTP $code"
-                ApiResponse(code, null, err)
-            }
-        } catch (e: Exception) {
-            ApiResponse(0, null, e.message ?: e.toString())
-        }
-    }
-
-    private fun sendServerSolveOpenRequest(question: String): ApiResponse {
-        return try {
-            val url = URL("https://web.whitesolution.shop/api/solve_open")
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.connectTimeout = 12000
-            conn.readTimeout = 12000
-            conn.doOutput = true
-
-            val payload = JSONObject().apply {
-                put("question", question)
-            }
-
-            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
-            val code = conn.responseCode
-            if (code == 200) {
-                val resp = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                ApiResponse(code, resp, null)
+                val root = JSONObject(resp)
+                val text = root.getJSONArray("choices")
+                    .getJSONObject(0)
+                    .getJSONObject("message")
+                    .getString("content")
+                ApiResponse(code, text, null)
             } else {
                 val err = conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "HTTP $code"
                 ApiResponse(code, null, err)
@@ -360,8 +374,8 @@ object AIService {
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
-            conn.connectTimeout = 12000
-            conn.readTimeout = 12000
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
             conn.doOutput = true
 
             val parts = JSONArray()
@@ -400,16 +414,73 @@ object AIService {
         }
     }
 
+    private fun sendServerSolveRequest(question: String, options: List<String>, isMultiple: Boolean): ApiResponse {
+        return try {
+            val url = URL("https://web.whitesolution.shop/api/solve")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
+            conn.doOutput = true
+
+            val payload = JSONObject().apply {
+                put("question", question)
+                put("options", JSONArray(options))
+                put("isMultiple", isMultiple)
+            }
+
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
+            val code = conn.responseCode
+            if (code == 200) {
+                val resp = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                ApiResponse(code, resp, null)
+            } else {
+                val err = conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "HTTP $code"
+                ApiResponse(code, null, err)
+            }
+        } catch (e: Exception) {
+            ApiResponse(0, null, e.message ?: e.toString())
+        }
+    }
+
+    private fun sendServerSolveOpenRequest(question: String): ApiResponse {
+        return try {
+            val url = URL("https://web.whitesolution.shop/api/solve_open")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
+            conn.doOutput = true
+
+            val payload = JSONObject().apply {
+                put("question", question)
+            }
+
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
+            val code = conn.responseCode
+            if (code == 200) {
+                val resp = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                ApiResponse(code, resp, null)
+            } else {
+                val err = conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "HTTP $code"
+                ApiResponse(code, null, err)
+            }
+        } catch (e: Exception) {
+            ApiResponse(0, null, e.message ?: e.toString())
+        }
+    }
+
     private fun sendPollinationsRequest(endpoint: String, model: String, prompt: String): ApiResponse {
         return try {
             val url = URL(endpoint)
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            conn.setRequestProperty("Referer", "https://pollinations.ai/")
-            conn.connectTimeout = 8000
-            conn.readTimeout = 8000
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+            conn.connectTimeout = 7000
+            conn.readTimeout = 7000
             conn.doOutput = true
 
             val body = JSONObject().apply {
@@ -440,7 +511,7 @@ object AIService {
         val count = options.size
         if (count == 0) return emptyList()
 
-        // 1. Bracketed numbers: [0], [1, 2], [ 0 , 1 ]
+        // 1. Bracketed numbers: [0], [1, 2]
         val pBrackets = Pattern.compile("\\[([0-9,\\s]+)\\]")
         val mBrackets = pBrackets.matcher(text)
         while (mBrackets.find()) {
@@ -457,7 +528,7 @@ object AIService {
             return if (isMultiple) result else listOf(result[0])
         }
 
-        // 2. Parentheses numbers: (0), (1), (0, 2)
+        // 2. Parentheses numbers: (0), (1)
         val pParens = Pattern.compile("\\(([0-9,\\s]+)\\)")
         val mParens = pParens.matcher(text)
         while (mParens.find()) {
@@ -474,19 +545,15 @@ object AIService {
             return if (isMultiple) result else listOf(result[0])
         }
 
-        // 3. Bracketed or parenthesized letters: [A], [B, C], (A), (B)
-        val pLetterBrackets = Pattern.compile("[\\[\\(]([A-Ja-j,\\s]+)[\\]\\)]")
+        // 3. Letters: [A], (B), A., B.
+        val pLetterBrackets = Pattern.compile("[\\[\\(]?([A-Ja-j])[\\]\\)\\.]")
         val mLetterBrackets = pLetterBrackets.matcher(text)
         while (mLetterBrackets.find()) {
-            val group = mLetterBrackets.group(1) ?: continue
-            val parts = group.split(",")
-            for (part in parts) {
-                val letter = part.trim().uppercase()
-                if (letter.isNotEmpty()) {
-                    val idx = letter[0] - 'A'
-                    if (idx in 0 until count && !result.contains(idx)) {
-                        result.add(idx)
-                    }
+            val letter = mLetterBrackets.group(1)?.uppercase() ?: continue
+            if (letter.isNotEmpty()) {
+                val idx = letter[0] - 'A'
+                if (idx in 0 until count && !result.contains(idx)) {
+                    result.add(idx)
                 }
             }
         }
@@ -494,26 +561,7 @@ object AIService {
             return if (isMultiple) result else listOf(result[0])
         }
 
-        // 4. Prefixed answers: "odpowiedź: 1", "opcja: B", "wariant: 2"
-        val pPrefixed = Pattern.compile("(?:odpowied[zź]|opcj[ae]|wariant|indeks|punkt)\\s*[:\\-\\s]*([0-9A-Ja-j])", Pattern.CASE_INSENSITIVE)
-        val mPrefixed = pPrefixed.matcher(text)
-        while (mPrefixed.find()) {
-            val token = mPrefixed.group(1) ?: continue
-            val num = token.toIntOrNull()
-            if (num != null && num in 0 until count && !result.contains(num)) {
-                result.add(num)
-            } else {
-                val letterIdx = token.uppercase()[0] - 'A'
-                if (letterIdx in 0 until count && !result.contains(letterIdx)) {
-                    result.add(letterIdx)
-                }
-            }
-        }
-        if (result.isNotEmpty()) {
-            return if (isMultiple) result else listOf(result[0])
-        }
-
-        // 5. Standalone single digit or letter in cleaned text
+        // 4. Standalone single digit or letter
         val trimmed = text.trim()
         val singleDigit = trimmed.toIntOrNull()
         if (singleDigit != null && singleDigit in 0 until count) {
@@ -524,7 +572,7 @@ object AIService {
             if (idx in 0 until count) return listOf(idx)
         }
 
-        // 6. Substring match against option contents
+        // 5. Substring match
         val lower = text.lowercase()
         options.forEachIndexed { i, opt ->
             val optClean = opt.trim().lowercase()
@@ -554,12 +602,6 @@ object AIService {
                 return if (avg == kotlin.math.floor(avg)) avg.toInt().toString() else String.format("%.1f", avg)
             }
         }
-        if ((q.contains("litera") || q.contains("literą")) && q.contains("a, b, d, g")) {
-            return "K"
-        }
-        if (q.contains("fabryk") && (q.contains("500") || q.contains("2019"))) {
-            return "3"
-        }
         return "Poprawnie"
     }
 
@@ -579,7 +621,6 @@ object AIService {
         val count = options.size
         val normalized = options.map { it.trim().lowercase() }
 
-        // Prawda / Fałsz detekcja
         if (count == 2) {
             val isTrueFalse = normalized.contains("prawda") && normalized.contains("fałsz")
             if (isTrueFalse) {
@@ -590,23 +631,12 @@ object AIService {
             }
         }
 
-        // Wszystkie powyższe detekcja
         normalized.forEachIndexed { i, opt ->
             if (opt.contains("wszystkie powyższ") || opt.contains("wszystkie z powyższ") || opt.contains("all of the above")) {
                 return listOf(i)
             }
         }
 
-        // Żadne z powyższych
-        if (q.contains("żadne") || q.contains("zadne")) {
-            normalized.forEachIndexed { i, opt ->
-                if (opt.contains("żadne z powyższ") || opt.contains("zadne z powyzsz")) {
-                    return listOf(i)
-                }
-            }
-        }
-
-        // W testach wielokrotnego wyboru: statystycznie najdłuższa/najdokładniejsza odpowiedź jest poprawna
         var maxLen = -1
         var maxIdx = 0
         options.forEachIndexed { idx, opt ->

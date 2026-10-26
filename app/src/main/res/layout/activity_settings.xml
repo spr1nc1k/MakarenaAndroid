@@ -14,7 +14,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:fontFamily="monospace"
-            android:text="WHITE SOLUTION ENGINE"
+            android:text="WHITE SOLUTION MULTI-AI ENGINE"
             android:textColor="@color/text_white"
             android:textSize="12sp"
             android:textStyle="bold" />
@@ -23,78 +23,32 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Konfiguracja Silnika AI"
+            android:text="Darmowi Dostawcy AI"
             android:textColor="@color/text_white"
             android:textSize="22sp"
             android:textStyle="bold" />
 
-        <!-- Card: Gemini API Key -->
-        <LinearLayout
-            android:layout_width="match_parent"
+        <TextView
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="18dp">
+            android:layout_marginTop="4dp"
+            android:text="Wklej darmowe klucze od jednego lub kilku dostawców. Silnik automatycznie rotuje kluczami i przełącza dostawców przy limitach."
+            android:textColor="@color/text_muted"
+            android:textSize="12sp" />
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Klucze Gemini API (Obsługa Rotacji)"
-                android:textColor="@color/text_white"
-                android:textSize="14sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="Wklej 1 lub kilka kluczy (oddzielonych przecinkiem lub spacją). Aplikacja automatycznie rotuje kluczami i modelami (Gemini 2.0 / 1.5)."
-                android:textColor="@color/text_muted"
-                android:textSize="12sp" />
-
-            <EditText
-                android:id="@+id/edit_api_key"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:minHeight="48dp"
-                android:layout_marginTop="14dp"
-                android:background="@drawable/bg_capsule"
-                android:fontFamily="monospace"
-                android:hint="@string/gemini_key_hint"
-                android:inputType="text"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp"
-                android:textColor="@color/text_white"
-                android:textColorHint="@color/text_muted"
-                android:textSize="12sp" />
-
-            <Button
-                android:id="@+id/btn_get_key"
-                style="@style/Widget.MaterialComponents.Button.TextButton"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="Otwórz Google AI Studio i pobierz darmowy klucz"
-                android:textColor="@color/text_white"
-                android:textSize="11sp" />
-        </LinearLayout>
-
-        <!-- Card: Manual Panic Mode / Info -->
+        <!-- Card 1: Google Gemini -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:padding="18dp">
+            android:padding="16dp">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Sterowanie Klawiszami Fizycznymi"
+                android:text="1. Google Gemini (100% Darmowy, Wizja)"
                 android:textColor="@color/text_white"
                 android:textSize="14sp"
                 android:textStyle="bold" />
@@ -102,22 +56,159 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="• 2x głośność w dół: Natychmiastowy przełącznik WŁĄCZ / WYŁĄCZ (działa trwale między kolejnymi pytaniami).\n• 2x głośność w górę: Panic Mode (natychmiastowe ukrycie wszystkich śladów i blokada)."
+                android:layout_marginTop="4dp"
+                android:text="Limit: 15 zapytań/min bez karty. Obsługuje analizę zdjęć i wykresów. Modele: Gemini 2.0 / 1.5 Flash."
                 android:textColor="@color/text_muted"
-                android:textSize="12sp" />
+                android:textSize="11sp" />
+
+            <EditText
+                android:id="@+id/edit_gemini_keys"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_capsule"
+                android:fontFamily="monospace"
+                android:hint="@string/gemini_key_hint"
+                android:inputType="text"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:textColor="@color/text_white"
+                android:textColorHint="@color/text_muted"
+                android:textSize="11sp" />
+
+            <Button
+                android:id="@+id/btn_get_gemini"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Otwórz Google AI Studio (Pobierz klucz)"
+                android:textColor="@color/text_white"
+                android:textSize="11sp" />
         </LinearLayout>
 
+        <!-- Card 2: GroqCloud -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="2. GroqCloud (100% Darmowy, 30 RPM, 0.2s)"
+                android:textColor="@color/text_white"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Limit: 30 zapytań/min, 14 400 zapytań/dobę bez karty. Ultraszybki model LLaMA 3.3 70B."
+                android:textColor="@color/text_muted"
+                android:textSize="11sp" />
+
+            <EditText
+                android:id="@+id/edit_groq_keys"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_capsule"
+                android:fontFamily="monospace"
+                android:hint="@string/groq_key_hint"
+                android:inputType="text"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:textColor="@color/text_white"
+                android:textColorHint="@color/text_muted"
+                android:textSize="11sp" />
+
+            <Button
+                android:id="@+id/btn_get_groq"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Otwórz GroqCloud Console (Pobierz klucz)"
+                android:textColor="@color/text_white"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- Card 3: OpenRouter -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="3. OpenRouter (Darmowe Modele :free)"
+                android:textColor="@color/text_white"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Dostęp do darmowych modeli Llama 3.3 70B, DeepSeek R1 i Gemma bez żadnych opłat."
+                android:textColor="@color/text_muted"
+                android:textSize="11sp" />
+
+            <EditText
+                android:id="@+id/edit_openrouter_keys"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_capsule"
+                android:fontFamily="monospace"
+                android:hint="@string/openrouter_key_hint"
+                android:inputType="text"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:textColor="@color/text_white"
+                android:textColorHint="@color/text_muted"
+                android:textSize="11sp" />
+
+            <Button
+                android:id="@+id/btn_get_openrouter"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Otwórz OpenRouter Keys (Pobierz klucz)"
+                android:textColor="@color/text_white"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- Save Button -->
         <Button
             android:id="@+id/btn_save"
             android:layout_width="match_parent"
-            android:layout_height="50dp"
-            android:layout_marginTop="26dp"
-            android:backgroundTint="@color/text_white"
-            android:text="ZAPISZ I WRÓĆ"
-            android:textColor="@color/oled_black"
+            android:layout_height="52dp"
+            android:layout_marginTop="20dp"
+            android:layout_marginBottom="30dp"
+            android:background="@drawable/bg_capsule"
+            android:text="ZAPISZ KONFIGURACJĘ"
+            android:textColor="@color/text_white"
             android:textStyle="bold" />
 
     </LinearLayout>
-
 </ScrollView>
