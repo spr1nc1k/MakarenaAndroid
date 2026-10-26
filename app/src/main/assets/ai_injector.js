@@ -1,663 +1,497 @@
-// ai_injector.js — Makarena AI Engine v1.2.1
-// Platform: Testportal (Vue/Angular SPA, DOM-structure-agnostic extractor)
-// Stealth Indicator: ONLY BOLDS THE LETTER (NO frame, NO border, NO dot, NO background)
-// End-to-end Telemetry: full audit trail sent to https://web.whitesolution.shop/api/log
+// ai_injector.js
+// Niewykrywalny silnik analizy DOM i podpowiedzi AI dla platformy Testportal
+// Tryb przełącznika (Persistent Toggle Mode):
+// 2x głośność w dół = WŁĄCZENIE (pozostaje aktywne na wszystkich kolejnych pytaniach)
+// 2x głośność w górę = WYŁĄCZENIE (Panic Mode, ukrycie i zatrzymanie asysty)
 
 (function() {
     'use strict';
 
-    if (window.__makarena_injector_loaded) return;
-    window.__makarena_injector_loaded = true;
-
-    if (typeof window.__makarena_ai_active === 'undefined') {
-        window.__makarena_ai_active = true;
-    }
-
-    // ─── Logging ──────────────────────────────────────────────────────────────
-    function sendLog(type, data) {
-        try {
-            window.prompt('__makarena_log:' + JSON.stringify({
-                type: type,
-                data: Object.assign({
-                    timestamp: Date.now(),
-                    url: window.location.href,
-                    aiActive: window.__makarena_ai_active
-                }, data || {})
-            }), '');
-        } catch (_) {}
-    }
-
-    sendLog('js_injector_initialized', {
-        active: window.__makarena_ai_active,
-        readyState: document.readyState
-    });
-
-    // ─── State ────────────────────────────────────────────────────────────────
     let isPanicMode = false;
+
     let isProcessing = false;
-    let currentQuestionSignature = '';
+    let currentQuestionText = '';
     let cachedOptionElements = [];
-    let lastResolvedIndices = [];
-    let lastResolvedOpenAnswer = '';
-
-    const styledOptionElements = [];
     const originalPlaceholders = new Map();
-    const originalValues = new Map();
-    const originalTinyMceValues = new Map();
-
-    // ─── DOM helpers ─────────────────────────────────────────────────────────
+    const modifiedNodes = [];
+    const activeGhostOverlays = [];
 
     function escapeHTML(str) {
         if (!str) return '';
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
-    function sanitizeQuestionText(raw) {
-        if (!raw) return '';
-        return raw
-            .replace(/Pozostały\s+czas[:\s]+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?/gi, '')
-            .replace(/Czas\s+na\s+odpowiedź[:\s]+[0-9]{1,2}:[0-9]{2}/gi, '')
-            .replace(/\b[0-9]{1,2}:[0-9]{2}\b/g, '')
-            .replace(/^\s*(?:Pytanie|Pyt\.?|Zadanie|Zad\.?)\s*\.?\:?\s*[0-9]+\s*\.?\:?\s*/i, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
+    // Ekstrakcja URL obrazu pytania (przesyłamy wyłącznie URL, bajty pobiera Swift natywnie bez ograniczeń CORS)
+    function extractQuestionImageUrl() {
+        const img = document.querySelector(
+            '.question_essence img, .question_content img, [class*="question"] img, #questionForm img, .question_image img'
+        );
 
-    function getDeepText(el, maxLen) {
-        if (!el) return '';
-        const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        return t.slice(0, maxLen || 2000);
-    }
+        if (!img) return null;
 
-    function safeGetClass(el) {
-        if (!el) return '';
-        if (typeof el.className === 'string') return el.className;
-        if (el.getAttribute) return el.getAttribute('class') || '';
-        return '';
-    }
-
-    // ─── Question extraction: structure-agnostic ───────────────────────────
-
-    function findQuestionElement() {
-        const KNOWN_Q_SELECTORS = [
-            '.question_essence',
-            '.question_text_content',
-            '.question_text',
-            '.question-text',
-            '.question_content',
-            '[class*="question_text"]',
-            '[class*="question-text"]',
-            '[class*="questionText"]',
-            '[class*="question_essence"]',
-            '.test-question-content',
-            '[class*="questionContent"]',
-            '[data-testid*="question"]',
-        ];
-        for (const sel of KNOWN_Q_SELECTORS) {
-            const el = document.querySelector(sel);
-            if (el) {
-                const t = sanitizeQuestionText(getDeepText(el, 1500));
-                if (t.length > 5) return { el, text: t, selector: sel };
-            }
-        }
-
-        const forms = Array.from(document.querySelectorAll('form, fieldset, [role="radiogroup"], [role="group"]'));
-        for (const f of forms) {
-            let prev = f.previousElementSibling;
-            while (prev) {
-                const t = sanitizeQuestionText(getDeepText(prev, 1500));
-                if (t.length > 10) return { el: prev, text: t, selector: 'preceding_sibling' };
-                prev = prev.previousElementSibling;
-            }
-            if (f.parentElement) {
-                const h = f.parentElement.querySelector('h1, h2, h3, h4, .title, [class*="title"]');
-                if (h) {
-                    const t = sanitizeQuestionText(getDeepText(h, 1500));
-                    if (t.length > 5) return { el: h, text: t, selector: 'form_heading' };
-                }
-            }
-        }
-
-        const candidates = Array.from(document.querySelectorAll('p, h2, h3, [class*="content"], [class*="Content"]'));
-        let best = null, bestLen = 0;
-        for (const el of candidates) {
-            if (el.querySelector('input, select, textarea, button')) continue;
-            const t = sanitizeQuestionText(getDeepText(el, 1500));
-            if (t.length > 15 && t.length > bestLen) {
-                best = { el, text: t, selector: 'longest_text_candidate' };
-                bestLen = t.length;
-            }
-        }
-        if (best) return best;
-
-        return null;
-    }
-
-    function findOptionContainers() {
-        const ANSWER_CLASSES = [
-            '.question_answers .question_answer',
-            '.question_answer',
-            '[class*="question_answer"]',
-            '[class*="answerOption"]',
-            '[class*="answer_option"]',
-            '[class*="answer-option"]',
-            '[class*="answer_item"]',
-            '[class*="answerItem"]',
-            '.answer_container',
-            '[class*="answer_container"]',
-            '[class*="answerContainer"]',
-            '.answer_item',
-            'label.answer',
-            '.question_option_wrapper',
-            '[class*="question_option"]',
-            '.true-false-option',
-            '.tf_option',
-        ];
-
-        for (const sel of ANSWER_CLASSES) {
-            const els = Array.from(document.querySelectorAll(sel));
-            if (els.length >= 2) {
-                const results = extractTextFromContainers(els);
-                if (results.length >= 2) return results;
-            }
-        }
-
-        const CONTROL_SELS = [
-            'input[type="radio"]', 'input[type="checkbox"]',
-            '[role="radio"]', '[role="checkbox"]',
-            '.mdc-radio', '.mdc-checkbox',
-            '[class*="radio"]', '[class*="checkbox"]',
-        ];
-
-        for (const sel of CONTROL_SELS) {
-            const inputs = Array.from(document.querySelectorAll(sel));
-            if (inputs.length >= 2) {
-                const containers = inputs.map(inp => {
-                    let el = inp;
-                    for (let i = 0; i < 6; i++) {
-                        const p = el.parentElement;
-                        if (!p) break;
-                        const tag = p.tagName.toLowerCase();
-                        if (tag === 'label' || tag === 'li' || tag === 'tr' || tag === 'td') return p;
-                        const cls = safeGetClass(p).toLowerCase();
-                        if (cls.includes('answer') || cls.includes('option') || cls.includes('choice')) return p;
-                        el = p;
-                    }
-                    return inp.parentElement || inp;
-                });
-                const results = extractTextFromContainers(containers);
-                if (results.length >= 2) return results;
-            }
-        }
-
-        const labels = Array.from(document.querySelectorAll('label'));
-        if (labels.length >= 2) {
-            const results = extractTextFromContainers(labels);
-            if (results.length >= 2) return results;
-        }
-
-        return [];
-    }
-
-    function extractTextFromContainers(els) {
-        const seen = new Set();
-        const results = [];
-        for (const el of els) {
-            if (!el) continue;
-            const textEl = el.querySelector('.answer_text, .option_text, .mdc-form-field, span, div') || el;
-            let text = (textEl.innerText || textEl.textContent || '').replace(/\s+/g, ' ').trim();
-            text = text.replace(/^[A-Za-z0-9][\.\:\)\-]\s*/, '').trim();
-            if (!text || text.length > 400) continue;
-            if (seen.has(text)) continue;
-            seen.add(text);
-            results.push({ el, text });
-        }
-        return results;
-    }
-
-    // ─── Signature ────────────────────────────────────────────────────────────
-
-    function computeQuestionSignature() {
-        const qId = document.querySelector('input[name="questionId"], input[name="id"], [data-question-id]');
-        const idVal = qId ? (qId.value || qId.getAttribute('data-question-id') || '') : '';
-
-        const qNum = document.querySelector('.question_number, .question_count, [class*="questionNumber"], [class*="question_count"]');
-        const numVal = qNum ? (qNum.innerText || '').trim() : '';
-
-        const qInfo = findQuestionElement();
-        const qText = qInfo ? qInfo.text.slice(0, 200) : '';
-
-        const sig = idVal + '||' + numVal + '||' + qText;
-        return sig.trim();
-    }
-
-    // ─── Main extraction ───────────────────────────────────────────────────
-
-    function extractQuestionData() {
-        try {
-            const qInfo = findQuestionElement();
-            const questionText = qInfo ? qInfo.text : '';
-
-            const imgEl = document.querySelector(
-                '.question_essence img, .question_content img, [class*="question"] img, #questionForm img, .question_image img'
-            );
-            const imgUrl = (imgEl && imgEl.src && !imgEl.src.includes('logo') && !imgEl.src.includes('icon_')) ? imgEl.src : null;
-
-            const openInput = document.querySelector(
-                '#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"], ' +
-                '.rich-text-answer-container, .all_short_answers input, ' +
-                'textarea, div[contenteditable="true"]'
-            );
-            const shortInput = document.querySelector(
-                '.mdc-text-field__input, input[type="text"]:not([name*="search"]):not([name*="url"]):not([name*="q"])'
-            );
-
-            const optionData = findOptionContainers();
-            cachedOptionElements = optionData.map(o => o.el);
-            const options = optionData.map((o, i) => ({ id: i, text: o.text }));
-
-            let type = 'unknown';
-            const hasCheckbox = !!document.querySelector(
-                'input[type="checkbox"], [role="checkbox"], .mdc-checkbox, [class*="checkbox"]'
-            );
-            const hasRadio = !!document.querySelector(
-                'input[type="radio"], [role="radio"], .mdc-radio, [class*="radio__"]'
-            );
-
-            if (openInput) {
-                type = 'open';
-            } else if (shortInput && options.length === 0) {
-                type = 'open';
-            } else if (hasCheckbox && options.length >= 2) {
-                type = 'multiple';
-            } else if (options.length >= 2) {
-                type = 'closed';
-            } else if (hasRadio) {
-                type = 'closed';
-            } else if (options.length === 1) {
-                type = 'closed';
-            } else if (shortInput) {
-                type = 'open';
-            }
-
-            if (type === 'open') cachedOptionElements = [];
-
-            sendLog('dom_extraction_success', {
-                detectedType: type,
-                questionPreview: questionText.slice(0, 100),
-                questionLength: questionText.length,
-                selectorUsed: qInfo ? qInfo.selector : 'none',
-                optionsCount: options.length,
-                optionsList: options.map(o => ({ id: o.id, text: o.text })),
-                hasRadio: hasRadio,
-                hasCheckbox: hasCheckbox,
-                hasOpenInput: !!openInput || !!shortInput
-            });
-
-            return {
-                type: type,
-                question: questionText,
-                options: options,
-                imageUrl: imgUrl
-            };
-        } catch (e) {
-            sendLog('dom_extraction_error', { error: String(e) });
+        const src = img.src || '';
+        if (src.includes('logo') || src.includes('avatar') || src.includes('icon_')) {
             return null;
         }
+
+        return src;
     }
 
-    // ─── Stealth Indicator: ONLY BOLD THE LETTER (No Frame, No Dot) ────────
+    // Główna ekstrakcja danych pytania i wariantów odpowiedzi
+    function extractQuestionData() {
+        // 1. Treść pytania
+        const questionTextEl = document.querySelector(
+            '.question_essence, .question_text_content, .question_content, .question-text, .question_text, ' +
+            '.test-question-content, [class*="question_text"], [class*="question-text"], .question, h1, h2, h3'
+        ) || document.body;
 
-    function boldLetterOnly(el, idx) {
-        if (!el) return;
-        try {
-            // 1. Check if the element already contains an explicit letter / number badge
-            const letterEl = el.querySelector(
-                '.answer_letter, .answer_number, [class*="letter"], [class*="number"], [class*="index"], .option_letter, [class*="badge"]'
-            );
-            if (letterEl && letterEl.innerText && letterEl.innerText.trim().length <= 4) {
-                letterEl.style.setProperty('font-weight', '900', 'important');
-                letterEl.setAttribute('data-makarena-bold', '1');
-                styledOptionElements.push(letterEl);
-                sendLog('letter_bolded', { method: 'explicit_element', index: idx, text: letterEl.innerText.trim() });
-                return;
+        const questionText = questionTextEl ? questionTextEl.innerText.trim().slice(0, 1000) : '';
+
+        // 2. URL obrazu
+        const imgUrl = extractQuestionImageUrl();
+
+        // 3. Wejścia wyboru (MDC / radio / checkbox)
+        const checkboxes = Array.from(document.querySelectorAll(
+            '#questionForm input[type="checkbox"], input[type="checkbox"]'
+        ));
+        const radioInputs = Array.from(document.querySelectorAll(
+            '#questionForm input[type="radio"], input[type="radio"]'
+        ));
+
+        // Pytanie otwarte
+        const openInput = document.querySelector(
+            '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), #givenAnswer_ifr, div[contenteditable="true"]'
+        );
+
+        // Kontenery odpowiedzi
+        let containers = [];
+        if (checkboxes.length > 0) {
+            containers = checkboxes.map(i => i.closest('.answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
+        } else if (radioInputs.length > 0) {
+            containers = radioInputs.map(i => i.closest('.answer_container, label, .question_option_wrapper, .answer_item, tr, li') || i.parentElement || i);
+        } else if (!openInput) {
+            containers = Array.from(document.querySelectorAll(
+                '.answer_container, .question_answers .answer, #questionForm .question_option_wrapper, label.answer, .true-false-option, .tf_option'
+            ));
+        }
+
+        let options = [];
+        const resolvedContainers = [];
+
+        containers.forEach((el) => {
+            let text = el.innerText ? el.innerText.trim() : el.textContent ? el.textContent.trim() : '';
+            const img = el.querySelector('img');
+            const imgUrl = img ? img.src : null;
+
+            if (text && text.length < 300) {
+                if (!options.some(o => o.text === text)) {
+                    options.push({ id: options.length, text: text, imageUrl: imgUrl });
+                    resolvedContainers.push(el);
+                }
+            } else if (img) {
+                // Wariant graficzny bez tekstu (np. zadania z sekwencjami figur / obrazkami)
+                const label = 'Opcja ' + (options.length + 1);
+                options.push({ id: options.length, text: label, imageUrl: imgUrl, isImageOnly: true });
+                resolvedContainers.push(el);
             }
+        });
 
-            // 2. Find the visible text container
-            const textEl = el.querySelector('.answer_text, .option_text, label, .mdc-form-field, span') || el;
-            if (!textEl) return;
+        // Specjalna detekcja dla pytań Prawda / Fałsz
+        if (options.length === 0 && !openInput) {
+            const tfKeywords = ['prawda', 'fałsz', 'true', 'false'];
+            const allElements = Array.from(document.querySelectorAll('label, div, button, span, td'));
+            const tfFound = [];
 
-            // Search for the first text node with text and wrap ONLY the letter/prefix in bold
-            const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT, null, false);
-            let node = walker.nextNode();
-            while (node) {
-                const val = node.nodeValue;
-                if (val && val.trim().length > 0) {
-                    const match = val.match(/^(\s*)([A-Za-z0-9\(\[\.\:\-]\s*)/);
-                    if (match) {
-                        const lead = match[1];
-                        const charPart = match[2];
-                        const tail = val.slice(lead.length + charPart.length);
-
-                        const span = document.createElement('span');
-                        span.setAttribute('data-makarena-letter', '1');
-                        span.style.setProperty('font-weight', '900', 'important');
-                        span.textContent = charPart;
-
-                        const parent = node.parentNode;
-                        if (lead.length > 0) parent.insertBefore(document.createTextNode(lead), node);
-                        parent.insertBefore(span, node);
-                        if (tail.length > 0) parent.insertBefore(document.createTextNode(tail), node);
-                        parent.removeChild(node);
-
-                        styledOptionElements.push(span);
-                        sendLog('letter_bolded', { method: 'wrapped_char', index: idx, char: charPart.trim() });
-                        return;
+            allElements.forEach(el => {
+                const t = (el.innerText || '').trim();
+                if (t.length > 0 && t.length < 30) {
+                    const lower = t.toLowerCase();
+                    if (tfKeywords.some(kw => lower === kw)) {
+                        if (!tfFound.some(o => o.text === t || o.el.contains(el))) {
+                            tfFound.push({ text: t, el: el });
+                        }
                     }
                 }
-                node = walker.nextNode();
+            });
+
+            if (tfFound.length >= 2) {
+                tfFound.forEach(item => {
+                    options.push({ id: options.length, text: item.text });
+                    resolvedContainers.push(item.el);
+                });
             }
-
-            // 3. Fallback: bold the text element
-            textEl.style.setProperty('font-weight', '900', 'important');
-            textEl.setAttribute('data-makarena-bold', '1');
-            styledOptionElements.push(textEl);
-            sendLog('letter_bolded', { method: 'container_fallback', index: idx });
-        } catch (e) {
-            sendLog('bold_letter_error', { index: idx, error: String(e) });
         }
+
+        cachedOptionElements = resolvedContainers;
+
+        let type = 'unknown';
+        const isMultiple = (checkboxes.length > 0 && options.length > 0) || document.querySelector('.mdc-checkbox') !== null;
+
+        if (isMultiple) {
+            type = 'multiple';
+        } else if (options.length >= 2 || (radioInputs.length > 0 && options.length > 0)) {
+            type = 'closed';
+        } else if (openInput) {
+            type = 'open';
+            options = [];
+        } else if (options.length === 1) {
+            type = 'closed';
+        }
+
+        const extracted = {
+            type: type,
+            question: questionText,
+            options: options,
+            imageUrl: imgUrl
+        };
+
+        return extracted;
     }
 
-    function revertModifications() {
-        styledOptionElements.forEach(el => {
-            if (!el) return;
-            try {
-                if (el.hasAttribute && el.hasAttribute('data-makarena-letter')) {
-                    const text = el.textContent || '';
-                    const textNode = document.createTextNode(text);
-                    if (el.parentNode) el.parentNode.replaceChild(textNode, el);
-                } else if (el.style) {
-                    el.style.removeProperty('font-weight');
-                    el.removeAttribute && el.removeAttribute('data-makarena-bold');
-                }
-            } catch (_) {}
-        });
-        styledOptionElements.length = 0;
+    // Pogrubianie pierwszej litery lub prefiksu
+    function boldFirstLetterOfElement(targetElement) {
+        if (!targetElement) return;
+        if (targetElement.getAttribute('data-makarena-marked')) return;
 
-        const inputs = document.querySelectorAll(
-            '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
-        );
-        inputs.forEach(input => {
-            try {
-                if (originalPlaceholders.has(input)) {
-                    input.setAttribute('placeholder', originalPlaceholders.get(input));
-                    input.placeholder = originalPlaceholders.get(input);
-                }
-            } catch (_) {}
-        });
-
-        const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
-        if (iframe && originalTinyMceValues.has(iframe)) {
-            try {
-                const ifrDoc = iframe.contentDocument || iframe.contentWindow.document;
-                if (ifrDoc && ifrDoc.body) {
-                    ifrDoc.body.innerHTML = originalTinyMceValues.get(iframe);
-                }
-            } catch (_) {}
-        }
-    }
-
-    // ─── Apply hints ─────────────────────────────────────────────────────────
-
-    function applyClosedHint(indicesArg) {
-        if (isPanicMode || !window.__makarena_ai_active) {
-            sendLog('applyClosed_ignored_inactive', { panic: isPanicMode, active: window.__makarena_ai_active });
+        // 1. Sprawdzamy czy istnieje bezpośredni span z literą opcji (A., B., 1., itp.)
+        const letterSpan = targetElement.querySelector('.option_letter, .answer_letter, .letter, [class*="letter"]');
+        if (letterSpan) {
+            const orig = letterSpan.innerText;
+            isProcessing = true;
+            letterSpan.innerHTML = '<strong style="font-weight: 900; font-size: 1.25em; color: #000; text-decoration: underline;">' + escapeHTML(orig) + '</strong>';
+            isProcessing = false;
+            modifiedNodes.push({ element: letterSpan, originalHTML: orig });
+            targetElement.setAttribute('data-makarena-marked', '1');
             return;
         }
+
+        // 2. Przeszukujemy węzły tekstowe bezpośrednio w kontenerze odpowiedzi
+        const walker = document.createTreeWalker(targetElement, NodeFilter.SHOW_TEXT, null, false);
+        let node = walker.nextNode();
+        while (node) {
+            const text = node.nodeValue;
+            if (text && text.trim().length > 0) {
+                const trimmed = text.trimStart();
+                const leadingWhitespace = text.slice(0, text.length - trimmed.length);
+                
+                // Prefiks lub pierwsza litera
+                const match = trimmed.match(/^([A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9][\)\.\:\-]?)/);
+                let boldLength = 1;
+                if (match && match[1]) {
+                    boldLength = match[1].length;
+                }
+
+                const firstPart = trimmed.slice(0, boldLength);
+                const restPart = trimmed.slice(boldLength);
+
+                const span = document.createElement('span');
+                isProcessing = true;
+                span.innerHTML = leadingWhitespace + '<strong style="font-weight: 900; font-size: 1.25em; color: #000; text-decoration: underline;">' + escapeHTML(firstPart) + '</strong>' + escapeHTML(restPart);
+                
+                if (node.parentNode) {
+                    const parentNode = node.parentNode;
+                    parentNode.replaceChild(span, node);
+                    modifiedNodes.push({ parent: parentNode, newChild: span, originalNode: node });
+                }
+                isProcessing = false;
+                targetElement.setAttribute('data-makarena-marked', '1');
+                break;
+            }
+            node = walker.nextNode();
+        }
+
+        // 3. Jeśli brak tekstu (opcja jest czystą grafiką/obrazkiem)
+        const optImg = targetElement.querySelector('img') || (targetElement.tagName === 'IMG' ? targetElement : null);
+        if (optImg) {
+            const origOutline = optImg.style.outline;
+            const origShadow = optImg.style.boxShadow;
+            isProcessing = true;
+            optImg.style.outline = '3px solid #26C6FF';
+            optImg.style.boxShadow = '0 0 12px rgba(38, 198, 255, 0.7)';
+            optImg.style.borderRadius = '6px';
+            isProcessing = false;
+            modifiedNodes.push({
+                element: optImg,
+                revert: function() {
+                    optImg.style.outline = origOutline;
+                    optImg.style.boxShadow = origShadow;
+                }
+            });
+            targetElement.setAttribute('data-makarena-marked', '1');
+            return;
+        }
+    }
+
+    // Cofnięcie modyfikacji DOM
+    function revertModifications() {
+        isProcessing = true;
+        modifiedNodes.forEach(item => {
+            if (item.revert) {
+                try { item.revert(); } catch(e) {}
+            } else if (item.element && item.originalHTML) {
+                item.element.innerHTML = item.originalHTML;
+                const parent = item.element.closest('[data-makarena-marked]');
+                if (parent) parent.removeAttribute('data-makarena-marked');
+            } else if (item.parent && item.newChild && item.originalNode) {
+                try {
+                    item.parent.replaceChild(item.originalNode, item.newChild);
+                    const parent = item.parent.closest('[data-makarena-marked]');
+                    if (parent) parent.removeAttribute('data-makarena-marked');
+                } catch(e) {}
+            }
+        });
+        modifiedNodes.length = 0;
+        document.querySelectorAll('[data-makarena-marked]').forEach(el => el.removeAttribute('data-makarena-marked'));
+        isProcessing = false;
+    }
+
+    // Aplikowanie podpowiedzi dla pytań zamkniętych i wielokrotnego wyboru
+    function applyClosedHint(indicesArg) {
+        if (isPanicMode) return;
 
         revertModifications();
 
         let indices = [];
-        if (Array.isArray(indicesArg)) indices = indicesArg;
-        else if (typeof indicesArg === 'number') indices = [indicesArg];
-
-        lastResolvedIndices = indices;
-        if (indices.length === 0) {
-            sendLog('applyClosed_empty_indices', {});
-            return;
+        if (Array.isArray(indicesArg)) {
+            indices = indicesArg;
+        } else if (typeof indicesArg === 'number') {
+            indices = [indicesArg];
         }
+
+        if (indices.length === 0) return;
 
         let targets = cachedOptionElements;
-        if (!targets || targets.length === 0) {
-            const fresh = findOptionContainers();
-            cachedOptionElements = fresh.map(o => o.el);
-            targets = cachedOptionElements;
-        }
 
-        sendLog('applyClosed_executing_bold_letter', {
-            targetIndices: indices,
-            availableContainersCount: targets.length
-        });
+        if (!targets || targets.length === 0) {
+            const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+            const radioInputs = Array.from(document.querySelectorAll('input[type="radio"]'));
+            if (checkboxes.length > 0) {
+                targets = checkboxes.map(i => i.closest('.answer_container, label, .question_option_wrapper, tr, li') || i.parentElement || i);
+            } else if (radioInputs.length > 0) {
+                targets = radioInputs.map(i => i.closest('.answer_container, label, .question_option_wrapper, tr, li') || i.parentElement || i);
+            } else {
+                targets = Array.from(document.querySelectorAll(
+                    '.answer_container, .question_option_wrapper, label.answer, .answer_item, .true-false-option, [class*="answer"]'
+                ));
+            }
+        }
 
         indices.forEach(idx => {
             if (targets && targets[idx]) {
-                boldLetterOnly(targets[idx], idx);
-            } else {
-                sendLog('applyClosed_target_out_of_bounds', {
-                    requestedIndex: idx,
-                    availableCount: targets ? targets.length : 0
-                });
+                boldFirstLetterOfElement(targets[idx]);
             }
         });
     }
 
-    function applyOpenHint(suggestedAnswer) {
-        if (isPanicMode || !window.__makarena_ai_active) return;
-        if (!suggestedAnswer) return;
-        const clean = String(suggestedAnswer).trim();
-        if (!clean || clean.length === 0) return;
-        const lower = clean.toLowerCase();
-        if (lower === 'poprawnie' || lower === 'poprawna' || lower === 'prawda' || lower === 'fałsz' || lower === 'brak') return;
-
-        lastResolvedOpenAnswer = clean;
-
-        const inputs = document.querySelectorAll(
-            '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]):not([name*="url"])'
-        );
-        let modifiedCount = 0;
-        inputs.forEach(input => {
-            try {
-                if (!originalPlaceholders.has(input)) {
-                    originalPlaceholders.set(input, input.getAttribute('placeholder') || '');
-                }
-                input.placeholder = '✦ ' + clean;
-                input.setAttribute('placeholder', '✦ ' + clean);
-                modifiedCount++;
-            } catch (_) {}
-        });
-
-        const iframe = document.querySelector('#givenAnswer_ifr, iframe[id*="givenAnswer"], iframe[id*="answer"]');
-        if (iframe) {
-            try {
-                const ifrDoc = iframe.contentDocument || iframe.contentWindow.document;
-                if (ifrDoc && ifrDoc.body) {
-                    if (!originalTinyMceValues.has(iframe)) {
-                        originalTinyMceValues.set(iframe, ifrDoc.body.innerHTML || '');
-                    }
-                    ifrDoc.body.innerHTML = '<p style="color:#555555;font-weight:bold;font-style:italic;">' + escapeHTML(clean) + '</p>';
-                    iframe._makarena_inserted = clean;
-                    modifiedCount++;
-                }
-            } catch (_) {}
+    // Aktualizacja podpowiedzi dla pytań otwartych
+    function updateGhostForInput(input, ghostOverlay) {
+        if (isPanicMode || !input._aiSuggestedAnswer) {
+            ghostOverlay.innerHTML = '';
+            return;
         }
 
-        sendLog('applyOpen_executed', {
-            answer: clean,
-            inputsModified: modifiedCount
+        const style = window.getComputedStyle(input);
+        const rect = input.getBoundingClientRect();
+
+        if (ghostOverlay.offsetWidth === 0 && ghostOverlay.offsetHeight === 0 && rect.width > 0) {
+            ghostOverlay.style.position = 'fixed';
+            ghostOverlay.style.top = rect.top + 'px';
+            ghostOverlay.style.left = rect.left + 'px';
+            ghostOverlay.style.width = rect.width + 'px';
+            ghostOverlay.style.height = rect.height + 'px';
+        } else {
+            ghostOverlay.style.position = 'absolute';
+            ghostOverlay.style.top = input.offsetTop + 'px';
+            ghostOverlay.style.left = input.offsetLeft + 'px';
+            ghostOverlay.style.width = input.offsetWidth + 'px';
+            ghostOverlay.style.height = input.offsetHeight + 'px';
+        }
+
+        ghostOverlay.style.padding = style.padding;
+        ghostOverlay.style.fontFamily = style.fontFamily;
+        ghostOverlay.style.fontSize = style.fontSize;
+        ghostOverlay.style.lineHeight = style.lineHeight;
+
+        const currentVal = input.value || '';
+        const suggestion = input._aiSuggestedAnswer;
+
+        if (suggestion.toLowerCase().startsWith(currentVal.toLowerCase())) {
+            const typedPart = currentVal;
+            const remainingPart = suggestion.slice(typedPart.length);
+
+            ghostOverlay.innerHTML = 
+                '<span style="opacity: 0;">' + escapeHTML(typedPart) + '</span>' +
+                '<span style="color: #666666; font-weight: 600; background: rgba(0, 85, 255, 0.12); border-radius: 2px;">' + escapeHTML(remainingPart) + '</span>';
+        } else {
+            ghostOverlay.innerHTML = '<span style="color: #888888; font-style: italic; opacity: 0.65;"> (' + escapeHTML(suggestion) + ')</span>';
+        }
+    }
+
+    function applyOpenHint(suggestedAnswer) {
+        if (isPanicMode || !suggestedAnswer) return;
+
+        const clean = suggestedAnswer.trim();
+        const lower = clean.toLowerCase();
+        if (lower.includes('404') || lower.includes('not found') || lower.includes('free limit') || lower.includes('error') || lower.includes('too many')) {
+            return;
+        }
+
+        const inputs = document.querySelectorAll(
+            '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
+        );
+        if (!inputs || inputs.length === 0) return;
+
+        inputs.forEach(input => {
+            input._aiSuggestedAnswer = clean;
+
+            if (!originalPlaceholders.has(input)) {
+                originalPlaceholders.set(input, input.getAttribute('placeholder') || '');
+            }
+            input.setAttribute('placeholder', clean);
+
+            let ghostOverlay = input._ghostOverlay;
+            if (!ghostOverlay) {
+                ghostOverlay = document.createElement('div');
+                ghostOverlay.className = 'makarena-ghost-overlay';
+                ghostOverlay.style.position = 'absolute';
+                ghostOverlay.style.pointerEvents = 'none';
+                ghostOverlay.style.color = '#777777';
+                ghostOverlay.style.whiteSpace = 'pre-wrap';
+                ghostOverlay.style.boxSizing = 'border-box';
+                ghostOverlay.style.zIndex = '999';
+
+                const parent = input.parentNode;
+                if (parent) {
+                    if (window.getComputedStyle(parent).position === 'static') {
+                        parent.style.position = 'relative';
+                    }
+                    parent.appendChild(ghostOverlay);
+                }
+                input._ghostOverlay = ghostOverlay;
+                activeGhostOverlays.push({ input: input, overlay: ghostOverlay });
+            }
+
+            function updateGhost() {
+                updateGhostForInput(input, ghostOverlay);
+                if (!input.value) {
+                    input.setAttribute('placeholder', clean);
+                }
+            }
+
+            input.removeEventListener('input', updateGhost);
+            input.removeEventListener('keyup', updateGhost);
+            input.removeEventListener('focus', updateGhost);
+            input.removeEventListener('click', updateGhost);
+            input.removeEventListener('touchstart', updateGhost);
+            input.removeEventListener('touchend', updateGhost);
+
+            input.addEventListener('input', updateGhost);
+            input.addEventListener('keyup', updateGhost);
+            input.addEventListener('focus', updateGhost);
+            input.addEventListener('click', updateGhost);
+            input.addEventListener('touchstart', updateGhost);
+            input.addEventListener('touchend', updateGhost);
+
+            updateGhost();
+            setTimeout(updateGhost, 80);
         });
     }
 
-    // ─── Panic / enable ──────────────────────────────────────────────────────
-
+    // Panic Mode — natychmiastowe ukrycie wszelkich śladów wizualnych
     function enablePanicMode() {
         isPanicMode = true;
-        window.__makarena_ai_active = false;
-        lastResolvedIndices = [];
-        lastResolvedOpenAnswer = '';
         revertModifications();
-        sendLog('panic_mode_enabled', {});
+
+        activeGhostOverlays.forEach(item => {
+            if (item.overlay) {
+                item.overlay.innerHTML = '';
+            }
+        });
+
+        const inputs = document.querySelectorAll('.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"], div[contenteditable="true"]');
+        inputs.forEach(input => {
+            if (originalPlaceholders.has(input)) {
+                input.setAttribute('placeholder', originalPlaceholders.get(input));
+            } else {
+                input.setAttribute('placeholder', 'Wprowadź odpowiedź');
+            }
+        });
+        originalPlaceholders.clear();
     }
 
     function disablePanicMode() {
         isPanicMode = false;
-        window.__makarena_ai_active = true;
-        sendLog('panic_mode_disabled', {});
     }
-
-    // ─── Question change detector ─────────────────────────────────────────
 
     function checkAndAutoAnalyzeNewQuestion() {
-        if (isPanicMode || !window.__makarena_ai_active || isProcessing) return;
-
-        const newSig = computeQuestionSignature();
-        if (!newSig || newSig === '||||' || newSig === currentQuestionSignature) return;
-
-        isProcessing = true;
-        try {
-            currentQuestionSignature = newSig;
-            lastResolvedIndices = [];
-            lastResolvedOpenAnswer = '';
-            revertModifications();
-
-            sendLog('new_question_detected', { signature: newSig });
-
-            const qData = extractQuestionData();
-            if (qData && qData.question && qData.question.length > 5) {
-                sendLog('bridge_sending_question', {
-                    type: qData.type,
-                    optionsCount: qData.options ? qData.options.length : 0
-                });
-                window.prompt('__makarena_bridge:' + JSON.stringify({
-                    action: 'questionDataExtracted',
-                    data: qData
-                }), '');
-            } else {
-                sendLog('question_extraction_insufficient', {
-                    length: qData ? (qData.question ? qData.question.length : 0) : 0
-                });
-            }
-        } finally {
-            isProcessing = false;
+        if (isPanicMode) return;
+        if (isProcessing) return;
+        const qData = extractQuestionData();
+        if (qData && qData.question && qData.question !== currentQuestionText) {
+            currentQuestionText = qData.question;
+            window.prompt('__makarena_bridge:' + JSON.stringify({
+                action: 'questionDataExtracted',
+                data: qData
+            }), '');
         }
     }
 
-    // ─── Guardian Tick ───────────────────────────────────────────────────────
-
-    function guardianTick() {
-        if (isPanicMode || !window.__makarena_ai_active) return;
-
-        if (lastResolvedIndices && lastResolvedIndices.length > 0) {
-            let needsReapply = false;
-            for (const idx of lastResolvedIndices) {
-                const el = cachedOptionElements[idx];
-                if (el && !el.querySelector('[data-makarena-letter]') && !el.hasAttribute('data-makarena-bold')) {
-                    needsReapply = true;
-                    break;
-                }
-            }
-            if (needsReapply) {
-                sendLog('guardian_reapplying_bold', { indices: lastResolvedIndices });
-                applyClosedHint(lastResolvedIndices);
-            }
-        }
-
-        if (lastResolvedOpenAnswer) {
-            const inputs = document.querySelectorAll(
-                '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"])'
-            );
-            let needsReapplyOpen = false;
-            for (const input of inputs) {
-                if (!input.getAttribute('placeholder') || !input.getAttribute('placeholder').includes(lastResolvedOpenAnswer.slice(0, 10))) {
-                    needsReapplyOpen = true;
-                    break;
-                }
-            }
-            if (needsReapplyOpen) {
-                sendLog('guardian_reapplying_open', { answer: lastResolvedOpenAnswer });
-                applyOpenHint(lastResolvedOpenAnswer);
-            }
-        }
-    }
-
-    // ─── DOM observation ─────────────────────────────────────────────────────
-
-    let mutationPending = false;
     const mutationObserver = new MutationObserver(function() {
-        if (isPanicMode || !window.__makarena_ai_active) return;
-        if (mutationPending) return;
-        mutationPending = true;
-        setTimeout(function() {
-            mutationPending = false;
-            checkAndAutoAnalyzeNewQuestion();
-            guardianTick();
-        }, 200);
+        if (isPanicMode) return;
+        if (isProcessing) return;
+        checkAndAutoAnalyzeNewQuestion();
     });
-
-    function startObserving() {
-        if (document.body) {
-            mutationObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
-        } else {
-            document.addEventListener('DOMContentLoaded', function() {
-                if (document.body) {
-                    mutationObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
-                }
-            });
-        }
+    
+    if (document.body) {
+        mutationObserver.observe(document.body, { childList: true, subtree: true });
+    } else {
+        document.addEventListener('DOMContentLoaded', function() {
+            mutationObserver.observe(document.body, { childList: true, subtree: true });
+        });
     }
-    startObserving();
+
+    // Sprawdzenie przy załadowaniu strony: jeśli asystent był włączony, automatycznie analizujemy nowe pytanie
+    if (!isPanicMode) {
+        setTimeout(function() {
+            if (!isPanicMode) {
+                checkAndAutoAnalyzeNewQuestion();
+            }
+        }, 400);
+    }
 
     setInterval(function() {
-        if (isPanicMode || !window.__makarena_ai_active) return;
-        checkAndAutoAnalyzeNewQuestion();
-        guardianTick();
+        if (isPanicMode) return;
+        activeGhostOverlays.forEach(item => {
+            if (item.input && item.input._aiSuggestedAnswer) {
+                updateGhostForInput(item.input, item.overlay);
+            }
+        });
     }, 600);
 
-    // ─── Native bridge event listener ────────────────────────────────────────
-
+    // Nasłuch zdarzeń sterowania ze Swift
     document.addEventListener('__makarena_action', function(e) {
         if (!e || !e.detail) return;
         const action = e.detail.action;
-        sendLog('action_event_received', { action: action, detail: e.detail });
 
-        if (action === 'enable' || action === 'analyze') {
+        if (action === 'analyze') {
             disablePanicMode();
-            currentQuestionSignature = '';
-            lastResolvedIndices = [];
-            lastResolvedOpenAnswer = '';
-            revertModifications();
-            setTimeout(checkAndAutoAnalyzeNewQuestion, 300);
-        } else if (action === 'disable' || action === 'panic') {
-            enablePanicMode();
+            currentQuestionText = '';
+            const data = extractQuestionData();
+            if (data) {
+                window.prompt('__makarena_bridge:' + JSON.stringify({
+                    action: 'questionDataExtracted',
+                    data: data
+                }), '');
+            }
         } else if (action === 'applyClosed') {
-            if (isPanicMode || !window.__makarena_ai_active) return;
-            const raw = e.detail.correctIndices;
-            if (!Array.isArray(raw) || raw.length === 0) return;
-            applyClosedHint(raw);
+            if (isPanicMode) return;
+            const indices = e.detail.correctIndices !== undefined ? e.detail.correctIndices : [e.detail.correctIndex];
+            applyClosedHint(indices);
         } else if (action === 'applyOpen') {
-            if (isPanicMode || !window.__makarena_ai_active) return;
+            if (isPanicMode) return;
             applyOpenHint(e.detail.answerText);
+        } else if (action === 'panic') {
+            enablePanicMode();
         }
     });
-
-    // Initial trigger
-    setTimeout(function() {
-        if (window.__makarena_ai_active && !isPanicMode) {
-            checkAndAutoAnalyzeNewQuestion();
-        }
-    }, 600);
-
 })();

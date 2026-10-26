@@ -1,4 +1,3 @@
-// Kotlin, Android 10+, com.makarena.browser.MainActivity
 package com.makarena.browser
 
 import android.annotation.SuppressLint
@@ -8,27 +7,14 @@ import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
-import android.webkit.ConsoleMessage
-import android.webkit.CookieManager
-import android.webkit.JsPromptResult
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.webkit.*
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ProgressBar
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebSettingsCompat
@@ -37,10 +23,7 @@ import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
 class MainActivity : AppCompatActivity() {
 
@@ -59,10 +42,10 @@ class MainActivity : AppCompatActivity() {
                 }.toString()
 
                 val bytes = payload.toByteArray(Charsets.UTF_8)
-                val conn = (URL(TELEMETRY_URL).openConnection() as HttpURLConnection).apply {
+                val conn = (java.net.URL(TELEMETRY_URL).openConnection() as java.net.HttpURLConnection).apply {
                     requestMethod = "POST"
-                    connectTimeout = 4000
-                    readTimeout = 4000
+                    connectTimeout = 6000
+                    readTimeout = 6000
                     doOutput = true
                     setFixedLengthStreamingMode(bytes.size)
                     setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
@@ -71,7 +54,7 @@ class MainActivity : AppCompatActivity() {
                 conn.outputStream.use { it.write(bytes) }
                 conn.responseCode
                 conn.disconnect()
-            } catch (_: Exception) {}
+            } catch (ignored: Exception) {}
         }
     }
 
@@ -86,10 +69,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSettings: ImageButton
     private lateinit var gestureStrip: View
 
-    private var isAIActive = true
+    private var isAIActive = false
+    private var volumeDownTimestamps = mutableListOf<Long>()
+    private var volumeUpTimestamps = mutableListOf<Long>()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var lastToggleTime = 0L
-    private var lastPanicTime = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,13 +82,15 @@ class MainActivity : AppCompatActivity() {
         setupWebView()
         setupListeners()
 
-        val startUrl = "https://www.testportal.pl"
-        webView.loadUrl(startUrl)
+        // Załaduj stronę domyślną
+        webView.loadUrl("https://www.testportal.pl")
+    }
 
-        sendNativeLog("engine_initialized", JSONObject().apply {
-            put("userAgent", webView.settings.userAgentString)
-            put("isAIActive", isAIActive)
-        })
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            webView.requestFocus()
+        }
     }
 
     private fun initViews() {
@@ -120,13 +105,15 @@ class MainActivity : AppCompatActivity() {
         btnSettings = findViewById(R.id.btn_settings)
         gestureStrip = findViewById(R.id.gesture_strip)
 
+        // Odczyt zapisanego stanu asystenta z SharedPreferences
         val prefs = getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
-        isAIActive = prefs.getBoolean("is_ai_active", true)
+        isAIActive = prefs.getBoolean("is_ai_active", false)
         updateStatusPill(false)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
+        // 1. Zapewnienie pełnej obsługi ciasteczek sesyjnych i 3rd-party dla serwisów autoryzacyjnych
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(webView, true)
@@ -145,17 +132,21 @@ class MainActivity : AppCompatActivity() {
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         settings.cacheMode = WebSettings.LOAD_DEFAULT
 
+        // Autentyczny User-Agent Google Chrome dla Android (zgodny ze specyfikacją User-Agent Reduction)
         val chromeUserAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
         settings.userAgentString = chromeUserAgent
 
+        // Wymuszenie fokusu systemowego dla WebView (zapobiega utracie focusu na rzecz EditText paska URL)
         webView.isFocusable = true
         webView.isFocusableInTouchMode = true
         webView.requestFocus()
 
+        // 2. Całkowite wyłączenie nagłówka X-Requested-With (identyfikatora WebView) na poziomie API AndroidX
         if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
             WebSettingsCompat.setRequestedWithHeaderOriginAllowList(settings, emptySet())
         }
 
+        // 3. Natywna iniekcja Document-Start (skrypt wykonuje się przed jakimkolwiek JS strony)
         val bypassScript = loadAssetScript("testportal_bypass.js")
         val hasDocStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         if (bypassScript.isNotEmpty() && hasDocStart) {
@@ -168,36 +159,46 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                val urlStr = request?.url?.toString() ?: return null
+                val url = request?.url ?: return null
+                val urlStr = url.toString()
+                if (!urlStr.startsWith("http://") && !urlStr.startsWith("https://")) {
+                    return null
+                }
 
-                if (urlStr.contains("testportal", ignoreCase = true) && !request.isForMainFrame) {
-                    val isPotentiallyBlocked = urlStr.endsWith(".ico") ||
-                                               urlStr.contains("favicon") ||
-                                               urlStr.contains("tracking") ||
-                                               urlStr.contains("analytics") ||
-                                               urlStr.contains("beacon")
+                val host = url.host ?: ""
+                if (host.contains("testportal.pl") || host.contains("testportal.net") || host.contains("testportal.com")) {
+                    val interceptData = JSONObject().apply {
+                        put("url", urlStr)
+                        put("method", request.method)
+                        put("isForMainFrame", request.isForMainFrame)
+                        val headersJson = JSONObject()
+                        request.requestHeaders?.forEach { (k, v) -> headersJson.put(k, v) }
+                        put("requestHeaders", headersJson)
+                    }
+                    sendNativeLog("native_intercepted_request", interceptData)
 
-                    if (isPotentiallyBlocked) {
+                    if (request.method.equals("GET", ignoreCase = true)) {
                         try {
-                            val conn = URL(urlStr).openConnection() as HttpURLConnection
-                            conn.requestMethod = request.method ?: "GET"
-                            conn.connectTimeout = 4000
-                            conn.readTimeout = 4000
-                            conn.instanceFollowRedirects = true
+                            val conn = (java.net.URL(urlStr).openConnection() as java.net.HttpURLConnection).apply {
+                                requestMethod = "GET"
+                                instanceFollowRedirects = false
+                                connectTimeout = 8000
+                                readTimeout = 8000
 
-                            request.requestHeaders?.forEach { (key, value) ->
-                                if (!key.equals("X-Requested-With", ignoreCase = true)) {
-                                    conn.setRequestProperty(key, value)
+                                request.requestHeaders?.forEach { (key, value) ->
+                                    if (!key.equals("X-Requested-With", ignoreCase = true)) {
+                                        setRequestProperty(key, value)
+                                    }
                                 }
-                            }
 
-                            val cookie = CookieManager.getInstance().getCookie(urlStr)
-                            if (!cookie.isNullOrEmpty()) {
-                                conn.setRequestProperty("Cookie", cookie)
-                            }
+                                val cookie = CookieManager.getInstance().getCookie(urlStr)
+                                if (!cookie.isNullOrEmpty()) {
+                                    setRequestProperty("Cookie", cookie)
+                                }
 
-                            if (conn.getRequestProperty("User-Agent") == null) {
-                                conn.setRequestProperty("User-Agent", chromeUserAgent)
+                                if (getRequestProperty("User-Agent") == null) {
+                                    setRequestProperty("User-Agent", chromeUserAgent)
+                                }
                             }
 
                             conn.connect()
@@ -234,7 +235,7 @@ class MainActivity : AppCompatActivity() {
                             }
 
                             return WebResourceResponse(mimeType, encoding, statusCode, reasonPhrase, responseHeaders, inputStream)
-                        } catch (_: Exception) {
+                        } catch (e: Exception) {
                             return null
                         }
                     }
@@ -268,11 +269,9 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 progressBar.visibility = View.VISIBLE
                 editUrl.setText(url ?: "")
-                sendNativeLog("native_onPageStarted", JSONObject().apply {
-                    put("url", url)
-                    put("isAIActive", isAIActive)
-                })
+                sendNativeLog("native_onPageStarted", JSONObject().apply { put("url", url) })
 
+                // Iniekcja zapasowa wyłącznie na urządzeniach bez natywnego DOCUMENT_START_SCRIPT
                 if (!hasDocStart && bypassScript.isNotEmpty()) {
                     view?.evaluateJavascript(bypassScript, null)
                 }
@@ -282,21 +281,18 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 progressBar.visibility = View.GONE
                 webView.requestFocus()
-                sendNativeLog("native_onPageFinished", JSONObject().apply {
-                    put("url", url)
-                    put("isAIActive", isAIActive)
-                })
+                sendNativeLog("native_onPageFinished", JSONObject().apply { put("url", url) })
 
+                // Iniekcja silnika analizy pytań i nakładek
                 val injectorScript = loadAssetScript("ai_injector.js")
                 if (injectorScript.isNotEmpty()) {
-                    view?.evaluateJavascript("window.__makarena_ai_active = $isAIActive;", null)
                     view?.evaluateJavascript(injectorScript, null)
                 }
 
+                // Jeśli asystent jest włączony (tryb przełącznika), automatycznie analizujemy nowe pytanie
                 if (isAIActive) {
                     mainHandler.postDelayed({
                         if (isAIActive) {
-                            sendNativeLog("native_trigger_ai_delayed", JSONObject().apply { put("url", url) })
                             triggerAIAnalysis()
                         }
                     }, 400)
@@ -304,7 +300,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Stealth IPC przez onJsPrompt (brak fingerprintów addJavascriptInterface)
         webView.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                super.onProgressChanged(view, newProgress)
+            }
+
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                 if (consoleMessage != null) {
                     val cData = JSONObject().apply {
@@ -331,7 +332,7 @@ class MainActivity : AppCompatActivity() {
                         try {
                             val logObj = JSONObject(payload)
                             sendNativeLog(logObj.optString("type", "js_event"), logObj.optJSONObject("data") ?: JSONObject())
-                        } catch (_: Exception) {
+                        } catch (e: Exception) {
                             sendNativeLog("js_raw_log", JSONObject().apply { put("raw", payload) })
                         }
                     }
@@ -377,6 +378,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Niewidoczny pasek gestów u dołu: potrójne kliknięcie jako alternatywny wyzwalacz AI
         gestureStrip.setOnClickListener(object : View.OnClickListener {
             private var lastTap = 0L
             private var tapCount = 0
@@ -385,7 +387,7 @@ class MainActivity : AppCompatActivity() {
                 val now = System.currentTimeMillis()
                 if (now - lastTap < 400) {
                     tapCount++
-                    if (tapCount >= 2) {
+                    if (tapCount >= 2) { // 3 tapnięcia
                         tapCount = 0
                         toggleAIAssistant()
                     }
@@ -397,62 +399,31 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun triggerHaptic(type: String) {
-        try {
-            val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                vm?.defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-            }
-            if (vibrator != null && vibrator.hasVibrator()) {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    when (type) {
-                        "on" -> vibrator.vibrate(VibrationEffect.createOneShot(140, VibrationEffect.DEFAULT_AMPLITUDE))
-                        "off" -> {
-                            val pattern = longArrayOf(0, 50, 50, 50)
-                            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
-                        }
-                        "panic" -> vibrator.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE))
-                    }
-                } else {
-                    @Suppress("DEPRECATION")
-                    vibrator.vibrate(140)
-                }
-            }
-        } catch (_: Exception) {}
-    }
-
+    // Przechwytywanie klawiszy głośności:
+    // 2x głośność w dół = WŁĄCZ / WYŁĄCZ (przełącznik permanentny)
+    // 2x głośność w górę = PANIC MODE
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        sendNativeLog("native_key_event", JSONObject().apply {
-            put("keyCode", event.keyCode)
-            put("action", event.action)
-            put("repeatCount", event.repeatCount)
-        })
-
-        // Obsługa wyzwalania na ACTION_UP z filtrem minimalnego odstępu (eliminacja wielokrotnych impulsów sprzętowych)
-        if (event.action == KeyEvent.ACTION_UP) {
+        if (event.action == KeyEvent.ACTION_DOWN) {
             val now = System.currentTimeMillis()
             when (event.keyCode) {
                 KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                    if (now - lastToggleTime > 500) {
-                        lastToggleTime = now
+                    volumeDownTimestamps.add(now)
+                    volumeDownTimestamps.removeAll { now - it > 500 }
+                    if (volumeDownTimestamps.size >= 2) {
+                        volumeDownTimestamps.clear()
                         toggleAIAssistant()
+                        return true
                     }
-                    return true
                 }
                 KeyEvent.KEYCODE_VOLUME_UP -> {
-                    if (now - lastPanicTime > 500) {
-                        lastPanicTime = now
+                    volumeUpTimestamps.add(now)
+                    volumeUpTimestamps.removeAll { now - it > 500 }
+                    if (volumeUpTimestamps.size >= 2) {
+                        volumeUpTimestamps.clear()
                         triggerPanicMode()
+                        return true
                     }
-                    return true
                 }
-            }
-        } else if (event.action == KeyEvent.ACTION_DOWN) {
-            if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                return true // Pochłaniamy systemową zmianę głośności bez wielokrotnego toggle'owania
             }
         }
         return super.dispatchKeyEvent(event)
@@ -460,78 +431,38 @@ class MainActivity : AppCompatActivity() {
 
     private fun toggleAIAssistant() {
         isAIActive = !isAIActive
+
+        // Zapisanie trwałego stanu w SharedPreferences
         val prefs = getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("is_ai_active", isAIActive).apply()
 
-        triggerHaptic(if (isAIActive) "on" else "off")
-        Toast.makeText(
-            this,
-            if (isAIActive) "AI ACTIVE (ON)" else "AI OFF",
-            Toast.LENGTH_SHORT
-        ).show()
-
         updateStatusPill(true)
 
-        sendNativeLog("native_ai_toggle", JSONObject().apply {
-            put("isAIActive", isAIActive)
-        })
-
-        val action = if (isAIActive) "enable" else "disable"
-        val js = "window.__makarena_ai_active = $isAIActive; document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: '$action' } }));"
-        webView.evaluateJavascript(js, null)
+        if (isAIActive) {
+            triggerAIAnalysis()
+        } else {
+            triggerPanicMode()
+        }
     }
 
     private fun triggerAIAnalysis() {
-        val js = "window.__makarena_ai_active = true; document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'analyze' } }));"
+        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'analyze' } }));"
         webView.evaluateJavascript(js, null)
     }
 
     private fun triggerPanicMode() {
-        isAIActive = false
-        val prefs = getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
-        prefs.edit().putBoolean("is_ai_active", false).apply()
-
-        triggerHaptic("panic")
-        Toast.makeText(this, "PANIC MODE (ALL OFF)", Toast.LENGTH_SHORT).show()
-
-        updateStatusPill(true)
-
-        sendNativeLog("native_panic_mode", JSONObject().apply {
-            put("isAIActive", false)
-        })
-
-        val js = "window.__makarena_ai_active = false; document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'panic' } }));"
+        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'panic' } }));"
         webView.evaluateJavascript(js, null)
     }
 
     private fun updateStatusPill(animate: Boolean) {
-        statusPill.visibility = View.VISIBLE
-        statusPill.alpha = 1f
         if (isAIActive) {
-            statusDot.setBackgroundColor(getColor(R.color.neon_green))
-            statusText.text = "AI ACTIVE"
-            statusText.setTextColor(getColor(R.color.text_white))
-
-            mainHandler.removeCallbacksAndMessages(null)
-            mainHandler.postDelayed({
-                if (isAIActive) {
-                    // Dyskretna redukcja po 2.5s (pozostaje mała zielona kropka lub pełne ukrycie dla stealth)
-                    statusPill.animate().alpha(0f).setDuration(350).withEndAction {
-                        statusPill.visibility = View.INVISIBLE
-                    }.start()
-                }
-            }, 2500)
+            statusDot.setBackgroundResource(R.drawable.bg_circle_btn)
+            statusText.text = "AI AKTYWNE"
+            statusPill.alpha = 1f
         } else {
-            statusDot.setBackgroundColor(getColor(R.color.neon_red))
-            statusText.text = "AI OFF"
-            statusText.setTextColor(getColor(R.color.neon_red))
-
-            mainHandler.removeCallbacksAndMessages(null)
-            mainHandler.postDelayed({
-                statusPill.animate().alpha(0f).setDuration(350).withEndAction {
-                    statusPill.visibility = View.INVISIBLE
-                }.start()
-            }, 1800)
+            statusText.text = "PANIC"
+            statusPill.alpha = 0f
         }
     }
 
@@ -540,13 +471,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 val json = JSONObject(payload)
                 val action = json.optString("action")
-                sendNativeLog("bridge_payload_received", JSONObject().apply {
-                    put("action", action)
-                    put("isAIActive", isAIActive)
-                })
-
                 if (action != "questionDataExtracted") return@launch
-                if (!isAIActive) return@launch
 
                 val data = json.getJSONObject("data")
                 val type = data.optString("type")
@@ -555,22 +480,13 @@ class MainActivity : AppCompatActivity() {
                 val imageUrl = data.optString("imageUrl", "")
                 val imageBase64 = if (imageUrl.isNotEmpty()) fetchImageBase64(imageUrl) else data.optString("imageBase64", null)
 
-                val optionsArr = data.optJSONArray("options") ?: JSONArray()
-                val options = mutableListOf<String>()
-                for (i in 0 until optionsArr.length()) {
-                    options.add(optionsArr.getJSONObject(i).optString("text"))
-                }
-
-                sendNativeLog("bridge_question_extracted", JSONObject().apply {
-                    put("type", type)
-                    put("question", question)
-                    put("options", JSONArray(options))
-                    put("optionsCount", options.size)
-                    put("isMultiple", isMultiple)
-                    put("hasImage", imageBase64 != null)
-                })
-
                 if (type == "closed" || type == "multiple") {
+                    val optionsArr = data.getJSONArray("options")
+                    val options = mutableListOf<String>()
+                    for (i in 0 until optionsArr.length()) {
+                        options.add(optionsArr.getJSONObject(i).optString("text"))
+                    }
+
                     val correctIndices = AIService.solveClosedQuestion(
                         applicationContext,
                         question,
@@ -579,59 +495,31 @@ class MainActivity : AppCompatActivity() {
                         imageBase64
                     )
 
-                    sendNativeLog("bridge_closed_resolved", JSONObject().apply {
-                        put("indices", JSONArray(correctIndices))
-                        put("optionsCount", options.size)
-                        put("chosenOptions", JSONArray(correctIndices.mapNotNull { options.getOrNull(it) }))
-                    })
-
                     withContext(Dispatchers.Main) {
-                        // Jeśli użytkownik nie uruchomił paniki celowo — zachowaj aktywność
-                        if (correctIndices.isNotEmpty()) {
-                            val indicesStr = correctIndices.joinToString(",", "[", "]")
-                            sendNativeLog("bridge_dispatching_applyClosed", JSONObject().apply {
-                                put("indicesStr", indicesStr)
-                                put("isAIActive", isAIActive)
-                            })
-                            // Zawsze zapewniamy przekazanie flagi aktywacji wprost do DOM przed wywołaniem
-                            val js = "window.__makarena_ai_active = true; document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyClosed', correctIndices: $indicesStr } }));"
-                            webView.evaluateJavascript(js, null)
-                        } else {
-                            sendNativeLog("bridge_no_indices_to_highlight", JSONObject().apply {
-                                put("reason", "empty_indices_returned")
-                            })
-                        }
+                        val indicesStr = correctIndices.joinToString(",", "[", "]")
+                        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyClosed', correctIndices: $indicesStr } }));"
+                        webView.evaluateJavascript(js, null)
                     }
                 } else if (type == "open") {
                     val answer = AIService.solveOpenQuestion(applicationContext, question, imageBase64)
-
-                    sendNativeLog("bridge_open_resolved", JSONObject().apply {
-                        put("answer", answer)
-                    })
-
                     withContext(Dispatchers.Main) {
-                        if (!isAIActive) return@withContext
-                        if (answer.isNotBlank()) {
-                            val escaped = answer.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").replace("\r", "")
-                            val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyOpen', answerText: \"$escaped\" } }));"
-                            webView.evaluateJavascript(js, null)
-                        }
+                        val escaped = answer.replace("\"", "\\\"").replace("\n", " ")
+                        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyOpen', answerText: \"$escaped\" } }));"
+                        webView.evaluateJavascript(js, null)
                     }
                 }
             } catch (e: Exception) {
-                sendNativeLog("bridge_handle_exception", JSONObject().apply {
-                    put("error", e.message ?: e.toString())
-                })
+                e.printStackTrace()
             }
         }
     }
 
     private fun fetchImageBase64(urlStr: String): String? {
         return try {
-            val url = URL(urlStr)
+            val url = java.net.URL(urlStr)
             val bytes = url.openStream().use { it.readBytes() }
             android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             null
         }
     }
@@ -639,7 +527,7 @@ class MainActivity : AppCompatActivity() {
     private fun loadAssetScript(filename: String): String {
         return try {
             assets.open(filename).bufferedReader().use { it.readText() }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             ""
         }
     }
