@@ -4,6 +4,8 @@
 package com.makarena.browser
 
 import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -24,11 +26,14 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -63,6 +68,15 @@ class MainActivity : AppCompatActivity() {
         initViews()
         setupWebView()
         setupListeners()
+        createNotificationChannel()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
+            }
+        }
+
+        startDeviceSyncLoop()
 
         webView.loadUrl("https://www.testportal.pl")
     }
@@ -566,6 +580,134 @@ class MainActivity : AppCompatActivity() {
             assets.open(filename).bufferedReader().use { it.readText() }
         } catch (_: Exception) {
             ""
+        }
+    }
+
+    private fun getDeviceId(): String {
+        val prefs = getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
+        var id = prefs.getString("device_id", "") ?: ""
+        if (id.isEmpty()) {
+            val androidId = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID)
+            id = if (!androidId.isNullOrEmpty() && androidId != "9774d56d682e549c") {
+                "dev_$androidId"
+            } else {
+                "dev_" + java.util.UUID.randomUUID().toString().replace("-", "").take(12)
+            }
+            prefs.edit().putString("device_id", id).apply()
+        }
+        return id
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                "makarena_c2_alerts",
+                "WhiteSolution Makarena Powiadomienia",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Powiadomienia administracyjne z panelu C2"
+                enableVibration(true)
+            }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+        }
+    }
+
+    private fun showSystemNotification(title: String, message: String) {
+        try {
+            val builder = NotificationCompat.Builder(this, "makarena_c2_alerts")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle(title)
+                .setContentText(message)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+            val manager = NotificationManagerCompat.from(this)
+            manager.notify((System.currentTimeMillis() % 10000).toInt(), builder.build())
+        } catch (_: Exception) {}
+    }
+
+    private fun startDeviceSyncLoop() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val deviceId = getDeviceId()
+            val deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}"
+
+            while (isActive) {
+                try {
+                    val url = java.net.URL("https://web.whitesolution.shop/api/device/heartbeat")
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.requestMethod = "POST"
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+                    conn.connectTimeout = 6000
+                    conn.readTimeout = 6000
+                    conn.doOutput = true
+
+                    val curUrl = withContext(Dispatchers.Main) { webView.url ?: "" }
+
+                    val payload = JSONObject().apply {
+                        put("deviceId", deviceId)
+                        put("model", deviceModel)
+                        put("appVersion", "1.3.0")
+                        put("currentUrl", curUrl)
+                        put("isAIActive", isAIActive)
+                    }
+
+                    java.io.OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
+
+                    val code = conn.responseCode
+                    if (code == 200) {
+                        val respStr = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                        val root = JSONObject(respStr)
+                        val commandsArr = root.optJSONArray("commands")
+                        if (commandsArr != null && commandsArr.length() > 0) {
+                            withContext(Dispatchers.Main) {
+                                for (i in 0 until commandsArr.length()) {
+                                    val cmd = commandsArr.getJSONObject(i)
+                                    handleServerCommand(cmd)
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+
+                delay(3500)
+            }
+        }
+    }
+
+    private fun handleServerCommand(cmd: JSONObject) {
+        val type = cmd.optString("type", "notification")
+        val title = cmd.optString("title", "Makarena Admin")
+        val message = cmd.optString("message", "")
+
+        when (type) {
+            "notification" -> {
+                showSystemNotification(title, message)
+                Toast.makeText(this, "$title: $message", Toast.LENGTH_LONG).show()
+                triggerHapticFeedback(true)
+            }
+            "toast" -> {
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                triggerHapticFeedback(true)
+            }
+            "panic" -> {
+                triggerPanicMode()
+                Toast.makeText(this, "ZDALNY PANIC: $message", Toast.LENGTH_SHORT).show()
+            }
+            "enable_ai" -> {
+                if (!isAIActive) toggleAIAssistant()
+            }
+            "hint" -> {
+                val escaped = message.replace("\"", "\\\"").replace("\n", " ")
+                val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyOpen', answerText: \"$escaped\" } }));"
+                webView.evaluateJavascript(js, null)
+                Toast.makeText(this, "Podpowiedź admina załadowana", Toast.LENGTH_SHORT).show()
+            }
+            else -> {
+                showSystemNotification(title, message)
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            }
         }
     }
 
