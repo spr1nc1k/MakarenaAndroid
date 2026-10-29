@@ -583,7 +583,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun getDeviceId(): String {
+    private fun getMakarenaDeviceId(): String {
         val prefs = getSharedPreferences("makarena_prefs", Context.MODE_PRIVATE)
         var id = prefs.getString("device_id", "") ?: ""
         if (id.isEmpty()) {
@@ -629,7 +629,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startDeviceSyncLoop() {
         lifecycleScope.launch(Dispatchers.IO) {
-            val deviceId = getDeviceId()
+            val deviceId = getMakarenaDeviceId()
             val deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}"
 
             while (isActive) {
