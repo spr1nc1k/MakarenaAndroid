@@ -648,7 +648,7 @@ class MainActivity : AppCompatActivity() {
                     val payload = JSONObject().apply {
                         put("deviceId", deviceId)
                         put("model", deviceModel)
-                        put("appVersion", "1.3.0")
+                        put("appVersion", "1.3.1")
                         put("currentUrl", curUrl)
                         put("isAIActive", isAIActive)
                     }
