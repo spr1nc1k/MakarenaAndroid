@@ -50,10 +50,10 @@
     }
 
     function extractQuestionData() {
-        // 1. Treść pytania
+        // 1. Treść pytania (wyłącznie dedykowane kontenery pytań Testportal)
         const questionTextEl = document.querySelector(
             '.question_essence, .question_text_content, .question_content, .question-text, .question_text, ' +
-            '.test-question-content, [class*="question_text"], [class*="question-text"], .question, h1, h2, h3'
+            '.test-question-content, [class*="question_text"], [class*="question-text"], .question'
         );
 
         let questionText = '';
@@ -411,6 +411,27 @@
         const qData = extractQuestionData();
         if (!qData || !qData.question || qData.question.length < 3) return;
 
+        // Odrzucanie ekranów końcowych, podsumowań i stron błędów
+        const lowerQ = qData.question.toLowerCase();
+        const nonQuestionPhrases = [
+            'zachowaj wynik',
+            'strona internetowa jest niedostępna',
+            'koniec testu',
+            'wynik testu',
+            'zaloguj się',
+            'testportal',
+            'błąd połączenia',
+            'kod testu'
+        ];
+        if (nonQuestionPhrases.some(phrase => lowerQ.includes(phrase))) {
+            return;
+        }
+
+        // Pytanie zamknięte musi posiadać co najmniej 2 warianty odpowiedzi
+        if ((qData.type === 'closed' || qData.type === 'multiple') && (!qData.options || qData.options.length < 2)) {
+            return;
+        }
+
         const sig = qData.question + '||' + qData.options.map(o => o.text).join('|');
         if (sig !== lastQuestionSignature) {
             lastQuestionSignature = sig;
@@ -462,7 +483,6 @@
 
         if (action === 'analyze') {
             disablePanicMode();
-            lastQuestionSignature = '';
             checkAndAutoAnalyzeNewQuestion();
         } else if (action === 'applyClosed') {
             if (isPanicMode) return;

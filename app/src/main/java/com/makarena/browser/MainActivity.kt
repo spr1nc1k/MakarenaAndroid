@@ -51,6 +51,10 @@ class MainActivity : AppCompatActivity() {
     private var volumeUpTimestamps = mutableListOf<Long>()
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private var currentSolveJob: kotlinx.coroutines.Job? = null
+    private var lastSolvedSignature: String = ""
+    private var lastSolvedTime: Long = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -446,65 +450,103 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleBridgePayload(payload: String) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val json = JSONObject(payload)
-                val action = json.optString("action")
-                if (action != "questionDataExtracted") return@launch
+        try {
+            val json = JSONObject(payload)
+            val action = json.optString("action")
+            if (action != "questionDataExtracted") return
 
-                val data = json.getJSONObject("data")
-                val type = data.optString("type")
-                val question = data.optString("question")
-                val isMultiple = (type == "multiple")
-                val imageUrl = data.optString("imageUrl", "")
-                val imageBase64 = if (imageUrl.isNotEmpty()) fetchImageBase64(imageUrl) else data.optString("imageBase64", null)
+            val data = json.getJSONObject("data")
+            val type = data.optString("type")
+            val question = data.optString("question").trim()
+            if (question.length < 3) return
 
-                TelemetryLogger.log("bridge_question_received", JSONObject().apply {
-                    put("type", type)
-                    put("question", question)
-                    put("isMultiple", isMultiple)
-                    put("hasImage", !imageBase64.isNullOrEmpty())
+            val isMultiple = (type == "multiple")
+            val imageUrl = data.optString("imageUrl", "")
+            val optionsArr = data.optJSONArray("options")
+            val options = mutableListOf<String>()
+            if (optionsArr != null) {
+                for (i in 0 until optionsArr.length()) {
+                    options.add(optionsArr.getJSONObject(i).optString("text"))
+                }
+            }
+
+            if ((type == "closed" || type == "multiple") && options.size < 2) {
+                return
+            }
+
+            val sig = "$type::$question::" + options.joinToString("|")
+            val now = System.currentTimeMillis()
+            if (sig == lastSolvedSignature && now - lastSolvedTime < 15000) {
+                TelemetryLogger.log("bridge_duplicate_ignored", JSONObject().apply {
+                    put("question", question.take(80))
                 })
+                return
+            }
 
-                if (type == "closed" || type == "multiple") {
-                    val optionsArr = data.getJSONArray("options")
-                    val options = mutableListOf<String>()
-                    for (i in 0 until optionsArr.length()) {
-                        options.add(optionsArr.getJSONObject(i).optString("text"))
+            currentSolveJob?.cancel()
+            currentSolveJob = lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    val imageBase64 = if (imageUrl.isNotEmpty()) fetchImageBase64(imageUrl) else data.optString("imageBase64", null)
+
+                    TelemetryLogger.log("bridge_question_received", JSONObject().apply {
+                        put("type", type)
+                        put("question", question)
+                        put("isMultiple", isMultiple)
+                        put("optionsCount", options.size)
+                        put("hasImage", !imageBase64.isNullOrEmpty())
+                    })
+
+                    if (type == "closed" || type == "multiple") {
+                        val correctIndices = AIService.solveClosedQuestion(
+                            applicationContext,
+                            question,
+                            options,
+                            isMultiple,
+                            imageBase64
+                        )
+
+                        if (!isActive) return@launch
+
+                        withContext(Dispatchers.Main) {
+                            if (!isAIActive) return@withContext
+                            val indicesStr = correctIndices.joinToString(",", "[", "]")
+                            TelemetryLogger.log("bridge_decision_dispatched", JSONObject().apply {
+                                put("indices", indicesStr)
+                                put("question", question.take(80))
+                            })
+                            lastSolvedSignature = sig
+                            lastSolvedTime = System.currentTimeMillis()
+                            val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyClosed', correctIndices: $indicesStr } }));"
+                            webView.evaluateJavascript(js, null)
+                        }
+                    } else if (type == "open") {
+                        val answer = AIService.solveOpenQuestion(applicationContext, question, imageBase64)
+                        if (!isActive) return@launch
+
+                        withContext(Dispatchers.Main) {
+                            if (!isAIActive) return@withContext
+                            val escaped = answer.replace("\"", "\\\"").replace("\n", " ")
+                            TelemetryLogger.log("bridge_open_dispatched", JSONObject().apply {
+                                put("answer", escaped)
+                            })
+                            lastSolvedSignature = sig
+                            lastSolvedTime = System.currentTimeMillis()
+                            val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyOpen', answerText: \"$escaped\" } }));"
+                            webView.evaluateJavascript(js, null)
+                        }
                     }
-
-                    val correctIndices = AIService.solveClosedQuestion(
-                        applicationContext,
-                        question,
-                        options,
-                        isMultiple,
-                        imageBase64
-                    )
-
-                    withContext(Dispatchers.Main) {
-                        val indicesStr = correctIndices.joinToString(",", "[", "]")
-                        TelemetryLogger.log("bridge_decision_dispatched", JSONObject().apply {
-                            put("indices", indicesStr)
+                } catch (e: Exception) {
+                    if (e !is kotlinx.coroutines.CancellationException) {
+                        TelemetryLogger.log("bridge_error", JSONObject().apply {
+                            put("error", e.message ?: e.toString())
                         })
-                        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyClosed', correctIndices: $indicesStr } }));"
-                        webView.evaluateJavascript(js, null)
-                    }
-                } else if (type == "open") {
-                    val answer = AIService.solveOpenQuestion(applicationContext, question, imageBase64)
-                    withContext(Dispatchers.Main) {
-                        val escaped = answer.replace("\"", "\\\"").replace("\n", " ")
-                        TelemetryLogger.log("bridge_open_dispatched", JSONObject().apply {
-                            put("answer", escaped)
-                        })
-                        val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyOpen', answerText: \"$escaped\" } }));"
-                        webView.evaluateJavascript(js, null)
                     }
                 }
-            } catch (e: Exception) {
-                TelemetryLogger.log("bridge_error", JSONObject().apply {
-                    put("error", e.message ?: e.toString())
-                })
             }
+        } catch (e: Exception) {
+            TelemetryLogger.log("bridge_payload_parse_error", JSONObject().apply {
+                put("error", e.message ?: e.toString())
+            })
         }
     }
 

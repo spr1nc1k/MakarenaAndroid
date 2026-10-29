@@ -11,8 +11,8 @@ android {
         applicationId = "com.makarena.browser"
         minSdk = 26
         targetSdk = 34
-        versionCode = 128
-        versionName = "1.2.8"
+        versionCode = 129
+        versionName = "1.2.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

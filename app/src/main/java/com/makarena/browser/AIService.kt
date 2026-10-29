@@ -36,6 +36,12 @@ object AIService {
         return raw.split(Regex("[,;\\s\\n]+")).map { it.trim() }.filter { it.isNotEmpty() }
     }
 
+    fun cleanOptionText(text: String): String {
+        return text.replace(Regex("^[A-Ja-j][\\.\\)\\:\\-]\\s*"), "")
+            .replace(Regex("^[0-9]+[\\.\\)\\:\\-]\\s*"), "")
+            .trim()
+    }
+
     suspend fun solveClosedQuestion(
         context: Context,
         question: String,
@@ -50,36 +56,40 @@ object AIService {
         val groqKeys = getGroqKeys(context)
         val openRouterKeys = getOpenRouterKeys(context)
 
-        val optionsFormatted = options.mapIndexed { idx, opt -> "[$idx] $opt" }.joinToString("\n")
+        val cleanedOptions = options.map { cleanOptionText(it) }
+        val optionsFormatted = cleanedOptions.mapIndexed { idx, opt -> "[$idx] $opt" }.joinToString("\n")
 
         val prompt = if (isMultiple) {
             """
-            Jesteś ekspertem rozwiązującym test. To jest pytanie WIELOKROTNEGO WYBORU (checkboxy).
-            Jedna, dwie lub więcej opcji może być poprawnych!
-            Przeanalizuj każdą opcję niezależnie.
-            Odpowiedz wyłącznie numerami poprawnych indeksów w nawiasach kwadratowych, np. [0, 2] lub [1, 2, 3].
+            Jesteś wybitnym ekspertem rozwiązującym test wielokrotnego wyboru.
+            W tym pytaniu JEDNA, DWIE LUB WIĘCEJ opcji może być poprawnych (checkboxy).
+            Przeanalizuj każdą opcję po kolei pod kątem faktów.
             
             Pytanie:
             $question
             
-            Opcje:
+            Opcje do wyboru:
             $optionsFormatted
             
-            Zwróć tylko nawiasy z indeksami, np: [0, 2]
+            Format odpowiedzi (dokładnie 2 linie):
+            Krótkie uzasadnienie faktów (1 zdanie): ...
+            Poprawne indeksy w nawiasie kwadratowym: [INDEKSY] (np. [0, 2])
             """.trimIndent()
         } else {
             """
-            Jesteś ekspertem rozwiązującym test. To jest pytanie JEDNOKROTNEGO WYBORU (lub Prawda/Fałsz).
-            Przeanalizuj dokładnie treść i wyznacz dokładnie JEDNĄ poprawną odpowiedź.
-            Nie wybieraj automatycznie pierwszej opcji.
+            Jesteś wybitnym ekspertem rozwiązującym test jednokrotnego wyboru.
+            Dokładnie JEDNA opcja jest w 100% poprawna.
+            WAŻNE: Opcja [0] NIE jest odpowiedzią domyślną. Zidentyfikuj właściwy fakt.
             
             Pytanie:
             $question
             
-            Opcje:
+            Opcje do wyboru:
             $optionsFormatted
             
-            Odpowiedz wyłącznie indeksem poprawnej opcji w nawiasie, np: [1]
+            Format odpowiedzi (dokładnie 2 linie):
+            Krótkie uzasadnienie faktów (1 zdanie): ...
+            Poprawny indeks w nawiasie kwadratowym: [INDEKS] (np. [1])
             """.trimIndent()
         }
 
@@ -420,6 +430,7 @@ object AIService {
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
             conn.connectTimeout = 10000
             conn.readTimeout = 10000
             conn.doOutput = true
@@ -450,6 +461,7 @@ object AIService {
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
             conn.connectTimeout = 10000
             conn.readTimeout = 10000
             conn.doOutput = true
@@ -619,14 +631,14 @@ object AIService {
     private fun fallbackSmartSolver(question: String, options: List<String>, isMultiple: Boolean): List<Int> {
         val q = question.lowercase()
         val count = options.size
+        if (count == 0) return listOf(0)
         val normalized = options.map { it.trim().lowercase() }
 
         if (count == 2) {
-            val isTrueFalse = normalized.contains("prawda") && normalized.contains("fałsz")
-            if (isTrueFalse) {
-                val pIdx = normalized.indexOf("prawda").coerceAtLeast(0)
-                val fIdx = normalized.indexOf("fałsz").coerceAtLeast(1)
-                val hasNeg = q.contains("nie ") || q.contains("brak") || q.contains("błędn") || q.contains("fałsz")
+            val pIdx = normalized.indexOfFirst { it == "prawda" || it == "true" }
+            val fIdx = normalized.indexOfFirst { it == "fałsz" || it == "false" }
+            if (pIdx != -1 && fIdx != -1) {
+                val hasNeg = q.contains("nie ") || q.contains("brak") || q.contains("błędn") || q.contains("fałsz") || q.contains("nieprawd")
                 return if (hasNeg) listOf(fIdx) else listOf(pIdx)
             }
         }
@@ -637,20 +649,46 @@ object AIService {
             }
         }
 
-        var maxLen = -1
-        var maxIdx = 0
+        val qWords = Regex("[\\p{L}0-9]{3,}").findAll(q).map { it.value }.toSet()
+        val scores = IntArray(count)
+
         options.forEachIndexed { idx, opt ->
-            if (opt.length > maxLen) {
-                maxLen = opt.length
-                maxIdx = idx
+            val optClean = cleanOptionText(opt).lowercase()
+            val optWords = Regex("[\\p{L}0-9]{3,}").findAll(optClean).map { it.value }.toSet()
+            var s = 0
+            for (w in optWords) {
+                if (qWords.contains(w)) s += 5
+            }
+            val datesInQ = Regex("\\b[0-9]{2,4}\\b").findAll(q).map { it.value }.toSet()
+            for (d in datesInQ) {
+                if (optClean.contains(d)) s += 10
+            }
+            scores[idx] = s
+        }
+
+        val maxScore = scores.maxOrNull() ?: 0
+        if (maxScore > 0) {
+            val bestIdx = scores.indexOf(maxScore)
+            return if (isMultiple) {
+                val above = scores.indices.filter { scores[it] >= maxScore / 2 && scores[it] > 0 }
+                if (above.isNotEmpty()) above else listOf(bestIdx)
+            } else {
+                listOf(bestIdx)
             }
         }
 
-        return if (isMultiple) {
-            if (count >= 2) listOf(0, 1) else listOf(0)
-        } else {
-            listOf(maxIdx)
+        var bestIdx = 0
+        var bestScore = -1
+        options.forEachIndexed { idx, opt ->
+            val optClean = cleanOptionText(opt)
+            val score = optClean.length
+            if (score > bestScore) {
+                bestScore = score
+                bestIdx = idx
+            }
         }
+
+        return if (isMultiple) listOf(bestIdx) else listOf(bestIdx)
     }
 
     private fun isError(text: String): Boolean {
