@@ -540,13 +540,16 @@ class MainActivity : AppCompatActivity() {
 
                         withContext(Dispatchers.Main) {
                             if (!isAIActive) return@withContext
-                            val escaped = answer.replace("\"", "\\\"").replace("\n", " ")
                             TelemetryLogger.log("bridge_open_dispatched", JSONObject().apply {
-                                put("answer", escaped)
+                                put("answer", answer)
                             })
                             lastSolvedSignature = sig
                             lastSolvedTime = System.currentTimeMillis()
-                            val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: { action: 'applyOpen', answerText: \"$escaped\" } }));"
+                            val eventDetail = JSONObject().apply {
+                                put("action", "applyOpen")
+                                put("answerText", answer)
+                            }
+                            val js = "document.dispatchEvent(new CustomEvent('__makarena_action', { detail: $eventDetail }));"
                             webView.evaluateJavascript(js, null)
                         }
                     }
@@ -648,7 +651,7 @@ class MainActivity : AppCompatActivity() {
                     val payload = JSONObject().apply {
                         put("deviceId", deviceId)
                         put("model", deviceModel)
-                        put("appVersion", "1.3.1")
+                        put("appVersion", "1.3.2")
                         put("currentUrl", curUrl)
                         put("isAIActive", isAIActive)
                     }

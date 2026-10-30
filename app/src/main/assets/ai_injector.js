@@ -26,7 +26,6 @@
     let cachedOptionElements = [];
     const originalPlaceholders = new Map();
     const modifiedNodes = [];
-    const activeGhostOverlays = [];
 
     function escapeHTML(str) {
         if (!str) return '';
@@ -272,47 +271,61 @@
         });
     }
 
-    function updateGhostForInput(input, ghostOverlay) {
-        if (isPanicMode || !input._aiSuggestedAnswer) {
-            ghostOverlay.innerHTML = '';
-            return;
-        }
+    function insertAnswerIntoEditor(text) {
+        if (!text) return;
 
-        const style = window.getComputedStyle(input);
-        const rect = input.getBoundingClientRect();
+        // 1. TinyMCE API (Global or activeEditor)
+        try {
+            if (window.tinymce && window.tinymce.activeEditor) {
+                window.tinymce.activeEditor.setContent('<p>' + escapeHTML(text) + '</p>');
+                window.tinymce.activeEditor.fire('change');
+                window.tinymce.activeEditor.fire('input');
+            }
+        } catch(_) {}
 
-        if (ghostOverlay.offsetWidth === 0 && ghostOverlay.offsetHeight === 0 && rect.width > 0) {
-            ghostOverlay.style.position = 'fixed';
-            ghostOverlay.style.top = rect.top + 'px';
-            ghostOverlay.style.left = rect.left + 'px';
-            ghostOverlay.style.width = rect.width + 'px';
-            ghostOverlay.style.height = rect.height + 'px';
-        } else {
-            ghostOverlay.style.position = 'absolute';
-            ghostOverlay.style.top = input.offsetTop + 'px';
-            ghostOverlay.style.left = input.offsetLeft + 'px';
-            ghostOverlay.style.width = input.offsetWidth + 'px';
-            ghostOverlay.style.height = input.offsetHeight + 'px';
-        }
+        // 2. TinyMCE Iframe DOM
+        try {
+            const iframes = document.querySelectorAll(
+                '#givenAnswer_ifr, iframe[id*="tinymce"], iframe.tox-edit-area__iframe, .tox-edit-area iframe'
+            );
+            iframes.forEach(ifr => {
+                try {
+                    const doc = ifr.contentDocument || (ifr.contentWindow && ifr.contentWindow.document);
+                    if (doc && doc.body) {
+                        doc.body.innerHTML = '<p>' + escapeHTML(text) + '</p>';
+                        doc.body.dispatchEvent(new Event('input', { bubbles: true }));
+                        doc.body.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                } catch(_) {}
+            });
+        } catch(_) {}
 
-        ghostOverlay.style.padding = style.padding;
-        ghostOverlay.style.fontFamily = style.fontFamily;
-        ghostOverlay.style.fontSize = style.fontSize;
-        ghostOverlay.style.lineHeight = style.lineHeight;
+        // 3. Native Textareas and Input Fields
+        try {
+            const inputs = document.querySelectorAll(
+                '#givenAnswer, textarea, .mdc-text-field__input, .all_short_answers input, input[type="text"]:not([name*="search"])'
+            );
+            inputs.forEach(inp => {
+                inp.value = text;
+                inp.dispatchEvent(new Event('input', { bubbles: true }));
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+        } catch(_) {}
 
-        const currentVal = input.value || '';
-        const suggestion = input._aiSuggestedAnswer;
+        // 4. Contenteditable Divs
+        try {
+            const editableDivs = document.querySelectorAll('div[contenteditable="true"]');
+            editableDivs.forEach(div => {
+                div.innerText = text;
+                div.dispatchEvent(new Event('input', { bubbles: true }));
+                div.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+        } catch(_) {}
+    }
 
-        if (suggestion.toLowerCase().startsWith(currentVal.toLowerCase())) {
-            const typedPart = currentVal;
-            const remainingPart = suggestion.slice(typedPart.length);
-
-            ghostOverlay.innerHTML =
-                '<span style="opacity: 0;">' + escapeHTML(typedPart) + '</span>' +
-                '<span style="color: #666666; font-weight: 600; background: rgba(0, 85, 255, 0.12); border-radius: 2px;">' + escapeHTML(remainingPart) + '</span>';
-        } else {
-            ghostOverlay.innerHTML = '<span style="color: #888888; font-style: italic; opacity: 0.65;"> (' + escapeHTML(suggestion) + ')</span>';
-        }
+    function removeOpenHintCard() {
+        const cards = document.querySelectorAll('.makarena-open-card');
+        cards.forEach(c => c.remove());
     }
 
     function applyOpenHint(suggestedAnswer) {
@@ -324,69 +337,126 @@
             return;
         }
 
-        const inputs = document.querySelectorAll(
-            '.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"]:not([name*="search"]), div[contenteditable="true"]'
-        );
-        if (!inputs || inputs.length === 0) return;
+        // Remove any previous card
+        removeOpenHintCard();
 
-        inputs.forEach(input => {
-            input._aiSuggestedAnswer = clean;
-
-            if (!originalPlaceholders.has(input)) {
-                originalPlaceholders.set(input, input.getAttribute('placeholder') || '');
-            }
-            input.setAttribute('placeholder', clean);
-
-            let ghostOverlay = input._ghostOverlay;
-            if (!ghostOverlay) {
-                ghostOverlay = document.createElement('div');
-                ghostOverlay.className = 'makarena-ghost-overlay';
-                ghostOverlay.style.position = 'absolute';
-                ghostOverlay.style.pointerEvents = 'none';
-                ghostOverlay.style.color = '#777777';
-                ghostOverlay.style.whiteSpace = 'pre-wrap';
-                ghostOverlay.style.boxSizing = 'border-box';
-                ghostOverlay.style.zIndex = '999';
-
-                const parent = input.parentNode;
-                if (parent) {
-                    if (window.getComputedStyle(parent).position === 'static') {
-                        parent.style.position = 'relative';
-                    }
-                    parent.appendChild(ghostOverlay);
+        // 1. If standard visible text input, set placeholder
+        const textInputs = document.querySelectorAll('.mdc-text-field__input, .all_short_answers input, input[type="text"]:not([name*="search"])');
+        textInputs.forEach(input => {
+            if (input.offsetWidth > 40) {
+                if (!originalPlaceholders.has(input)) {
+                    originalPlaceholders.set(input, input.getAttribute('placeholder') || '');
                 }
-                input._ghostOverlay = ghostOverlay;
-                activeGhostOverlays.push({ input: input, overlay: ghostOverlay });
+                input.setAttribute('placeholder', clean);
             }
-
-            function updateGhost() {
-                updateGhostForInput(input, ghostOverlay);
-                if (!input.value) {
-                    input.setAttribute('placeholder', clean);
-                }
-            }
-
-            input.removeEventListener('input', updateGhost);
-            input.removeEventListener('keyup', updateGhost);
-            input.removeEventListener('focus', updateGhost);
-            input.addEventListener('input', updateGhost);
-            input.addEventListener('keyup', updateGhost);
-            input.addEventListener('focus', updateGhost);
-
-            updateGhost();
-            setTimeout(updateGhost, 80);
         });
+
+        // 2. Render Sleek Floating Stealth Assist Card
+        const card = document.createElement('div');
+        card.className = 'makarena-open-card';
+        card.setAttribute('data-makarena-marked', 'true');
+        card.style.cssText = [
+            'position: fixed',
+            'bottom: 12px',
+            'left: 12px',
+            'right: 12px',
+            'max-width: 440px',
+            'margin: 0 auto',
+            'background: rgba(15, 23, 42, 0.94)',
+            'backdrop-filter: blur(12px)',
+            '-webkit-backdrop-filter: blur(12px)',
+            'border: 1px solid rgba(56, 189, 248, 0.4)',
+            'border-radius: 12px',
+            'box-shadow: 0 10px 25px -5px rgba(0,0,0,0.6), 0 0 12px rgba(56, 189, 248, 0.2)',
+            'padding: 10px 14px',
+            'z-index: 2147483647',
+            'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+            'color: #f8fafc',
+            'transition: opacity 0.2s ease, transform 0.2s ease',
+            'box-sizing: border-box'
+        ].join(';');
+
+        // Header
+        const header = document.createElement('div');
+        header.style.cssText = 'display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;';
+
+        const titleBox = document.createElement('div');
+        titleBox.style.cssText = 'display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #38bdf8;';
+        titleBox.innerHTML = '<span style="width: 7px; height: 7px; background: #38bdf8; border-radius: 50%; box-shadow: 0 0 6px #38bdf8; display: inline-block;"></span> Odpowiedź AI';
+
+        const btnBox = document.createElement('div');
+        btnBox.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+        const insertBtn = document.createElement('button');
+        insertBtn.innerText = 'Wstaw do pola';
+        insertBtn.style.cssText = [
+            'background: linear-gradient(135deg, #0284c7, #0369a1)',
+            'color: #ffffff',
+            'border: none',
+            'border-radius: 6px',
+            'padding: 4px 10px',
+            'font-size: 11px',
+            'font-weight: 700',
+            'cursor: pointer',
+            'outline: none',
+            'box-shadow: 0 2px 6px rgba(2, 132, 199, 0.4)'
+        ].join(';');
+
+        insertBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            insertAnswerIntoEditor(clean);
+            insertBtn.innerText = '✓ Wstawiono!';
+            insertBtn.style.background = '#10b981';
+            setTimeout(function() {
+                if (insertBtn) {
+                    insertBtn.innerText = 'Wstaw do pola';
+                    insertBtn.style.background = 'linear-gradient(135deg, #0284c7, #0369a1)';
+                }
+            }, 1800);
+            sendLog('open_hint_inserted', {});
+        });
+
+        const closeBtn = document.createElement('button');
+        closeBtn.innerHTML = '&times;';
+        closeBtn.style.cssText = 'background: transparent; color: #94a3b8; border: none; font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px;';
+        closeBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            card.remove();
+        });
+
+        btnBox.appendChild(insertBtn);
+        btnBox.appendChild(closeBtn);
+        header.appendChild(titleBox);
+        header.appendChild(btnBox);
+
+        // Content
+        const content = document.createElement('div');
+        content.style.cssText = [
+            'font-size: 12.5px',
+            'line-height: 1.45',
+            'color: #e2e8f0',
+            'max-height: 120px',
+            'overflow-y: auto',
+            'user-select: text',
+            '-webkit-user-select: text',
+            'word-break: break-word',
+            'white-space: pre-wrap'
+        ].join(';');
+        content.innerText = clean;
+
+        card.appendChild(header);
+        card.appendChild(content);
+
+        document.body.appendChild(card);
+        sendLog('open_hint_card_rendered', { length: clean.length });
     }
 
     function enablePanicMode() {
         isPanicMode = true;
         revertModifications();
-
-        activeGhostOverlays.forEach(item => {
-            if (item.overlay) {
-                item.overlay.innerHTML = '';
-            }
-        });
+        removeOpenHintCard();
 
         const inputs = document.querySelectorAll('.mdc-text-field__input, .all_short_answers input, textarea, input[type="text"], div[contenteditable="true"]');
         inputs.forEach(input => {
@@ -435,6 +505,8 @@
         const sig = qData.question + '||' + qData.options.map(o => o.text).join('|');
         if (sig !== lastQuestionSignature) {
             lastQuestionSignature = sig;
+            removeOpenHintCard();
+            revertModifications();
             sendLog('question_detected_in_dom', {
                 type: qData.type,
                 questionPreview: qData.question.slice(0, 120),
@@ -469,11 +541,6 @@
     setInterval(function() {
         if (isPanicMode) return;
         checkAndAutoAnalyzeNewQuestion();
-        activeGhostOverlays.forEach(item => {
-            if (item.input && item.input._aiSuggestedAnswer) {
-                updateGhostForInput(item.input, item.overlay);
-            }
-        });
     }, 450);
 
     // Nasłuch zdarzeń od natywnego środowiska Android (Kotlin)

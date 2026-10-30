@@ -305,38 +305,57 @@ object AIService {
         val startTime = System.currentTimeMillis()
         val geminiKeys = getGeminiKeys(context)
         val groqKeys = getGroqKeys(context)
-        val prompt = "Odpowiedz na poniższe pytanie otwarte z testu bardzo zwięźle i precyzyjnie (sama liczba lub 1-3 konkretne słowa):\n$question"
+        val prompt = """
+        Jesteś wybitnym ekspertem rozwiązującym test wiedzy.
+        Odpowiedz na poniższe pytanie otwarte bezpośrednio w języku polskim.
+        Jeśli pytanie wymaga podania daty, nazwiska, pojęcia lub liczby - podaj konkretną informację.
+        Jeśli wymaga wyjaśnienia, definicji lub podania różnicy - podaj 1-3 zwięzłe, merytoryczne i wyczerpujące zdania.
+        ZAKAZ pisania wstępów typu "Oto odpowiedź", "Odpowiedź na pytanie" ani żadnych tekstów po angielsku. Zwróć wyłącznie samą treść odpowiedzi.
+        
+        Pytanie otwarte:
+        $question
+        """.trimIndent()
 
+        // 1. Groq Qwen 3.8 27B / GPT-OSS Pool (0.4s direct Polish answers)
+        if (groqKeys.isNotEmpty()) {
+            val openModels = listOf("qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b")
+            for (key in groqKeys) {
+                for (model in openModels) {
+                    val resp = sendOpenAiCompatibleRequest("https://api.groq.com/openai/v1/chat/completions", key, model, prompt)
+                    if (resp.statusCode == 200 && !resp.body.isNullOrBlank() && !isError(resp.body)) {
+                        val parsed = parseOpenAnswer(resp.body)
+                        if (parsed.isNotEmpty()) return@withContext parsed
+                    }
+                }
+            }
+        }
+
+        // 2. Gemini Fallback
         if (geminiKeys.isNotEmpty()) {
             for (key in geminiKeys) {
                 val resp = sendGeminiRequest(prompt, key, "gemini-2.0-flash", imageBase64)
                 if (resp.statusCode == 200 && !resp.body.isNullOrBlank() && !isError(resp.body)) {
-                    return@withContext parseOpenAnswer(resp.body)
+                    val parsed = parseOpenAnswer(resp.body)
+                    if (parsed.isNotEmpty()) return@withContext parsed
                 }
             }
         }
 
-        if (groqKeys.isNotEmpty()) {
-            for (key in groqKeys) {
-                val resp = sendOpenAiCompatibleRequest("https://api.groq.com/openai/v1/chat/completions", key, "openai/gpt-oss-120b", prompt)
-                if (resp.statusCode == 200 && !resp.body.isNullOrBlank() && !isError(resp.body)) {
-                    return@withContext parseOpenAnswer(resp.body)
-                }
-            }
-        }
-
+        // 3. Remote Server Solver Relay
         try {
             val serverResp = sendServerSolveOpenRequest(question)
             if (serverResp.statusCode == 200 && serverResp.body != null) {
                 val sObj = JSONObject(serverResp.body)
                 val ans = sObj.optString("answer", "")
-                if (ans.isNotEmpty()) return@withContext ans
+                if (ans.isNotEmpty()) return@withContext parseOpenAnswer(ans)
             }
         } catch (_: Exception) {}
 
+        // 4. Pollinations Fallback
         val freeResp = sendPollinationsRequest("https://text.pollinations.ai/", "openai", prompt)
         if (freeResp.statusCode == 200 && !freeResp.body.isNullOrBlank() && !isError(freeResp.body)) {
-            return@withContext parseOpenAnswer(freeResp.body)
+            val parsed = parseOpenAnswer(freeResp.body)
+            if (parsed.isNotEmpty()) return@withContext parsed
         }
 
         val fallback = synthesizeFallbackOpen(question)
@@ -379,9 +398,8 @@ object AIService {
                 var text = msgObj.optString("content", "").trim()
                 val reasoning = msgObj.optString("reasoning", "").trim()
                 if (text.isEmpty() && reasoning.isNotEmpty()) {
+                    // Extract answer portion from reasoning if content is empty
                     text = reasoning
-                } else if (reasoning.isNotEmpty()) {
-                    text = "$reasoning\n$text"
                 }
                 ApiResponse(code, text, null)
             } else {
@@ -613,11 +631,26 @@ object AIService {
     }
 
     private fun parseOpenAnswer(text: String): String {
-        val clean = text.replace("```json", "").replace("```", "").trim()
-        if (clean.contains(":")) {
-            val after = clean.substringAfter(":").trim()
-            if (after.isNotEmpty()) return after
+        var clean = text.replace(Regex("```[a-zA-Z]*"), "").replace("```", "").trim()
+        clean = clean.replace(Regex("<think>[\\s\\S]*?</think>"), "").trim()
+        
+        // Strip leaked prompt / English meta chatter
+        if (clean.contains("user asks:", ignoreCase = true) || clean.contains("The user asks:", ignoreCase = true)) {
+            val lines = clean.split("\n").filter { line ->
+                val l = line.lowercase()
+                !l.contains("user asks") && !l.contains("they want") && !l.contains("odpowiedz na")
+            }
+            clean = lines.joinToString(" ").trim()
         }
+
+        if (clean.startsWith("Odpowiedź:", ignoreCase = true)) {
+            clean = clean.replace(Regex("^Odpowiedź:\\s*", RegexOption.IGNORE_CASE), "").trim()
+        } else if (clean.startsWith("Odp:", ignoreCase = true)) {
+            clean = clean.replace(Regex("^Odp:\\s*", RegexOption.IGNORE_CASE), "").trim()
+        } else if (clean.startsWith("Uzasadnienie:", ignoreCase = true)) {
+            clean = clean.replace(Regex("^Uzasadnienie:\\s*", RegexOption.IGNORE_CASE), "").trim()
+        }
+
         return clean
     }
 
